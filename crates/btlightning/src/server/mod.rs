@@ -98,6 +98,34 @@ impl ValidatorConnection {
     }
 }
 
+pub(super) fn evict_stale_nonces(
+    nonces: &mut IndexMap<String, u64>,
+    now: u64,
+    max_age: u64,
+    hard_cap: Option<usize>,
+) {
+    let cutoff = now.saturating_sub(max_age);
+    nonces.retain(|_, ts| *ts >= cutoff);
+    if let Some(cap) = hard_cap {
+        while nonces.len() > cap {
+            nonces.shift_remove_index(0);
+        }
+    }
+}
+
+pub(super) fn remove_hotkey_from_maps(
+    connections: &mut HashMap<String, ValidatorConnection>,
+    addr_to_hotkey: &mut HashMap<SocketAddr, String>,
+    hotkey: &str,
+) -> Option<ValidatorConnection> {
+    if let Some(conn) = connections.remove(hotkey) {
+        addr_to_hotkey.remove(&conn.connection.remote_address());
+        Some(conn)
+    } else {
+        None
+    }
+}
+
 #[derive(Clone)]
 struct ServerContext {
     connections: Arc<RwLock<HashMap<String, ValidatorConnection>>>,
@@ -122,6 +150,21 @@ pub struct LightningServer {
     endpoint: Option<Endpoint>,
     cleanup_handle: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
     permit_refresh_handle: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
+}
+
+macro_rules! register_handler {
+    ($method:ident, $field:ident, $trait:ident, $label:expr) => {
+        #[instrument(skip(self, handler), fields(%synapse_type))]
+        pub async fn $method(&self, synapse_type: String, handler: Arc<dyn $trait>) -> Result<()> {
+            let mut handlers = self.ctx.$field.write().await;
+            handlers.insert(synapse_type.clone(), handler);
+            info!(
+                concat!("Registered ", $label, " handler for: {}"),
+                synapse_type
+            );
+            Ok(())
+        }
+    };
 }
 
 impl LightningServer {
@@ -184,41 +227,24 @@ impl LightningServer {
         Ok(())
     }
 
-    #[instrument(skip(self, handler), fields(%synapse_type))]
-    pub async fn register_synapse_handler(
-        &self,
-        synapse_type: String,
-        handler: Arc<dyn SynapseHandler>,
-    ) -> Result<()> {
-        let mut handlers = self.ctx.synapse_handlers.write().await;
-        handlers.insert(synapse_type.clone(), handler);
-        info!("Registered synapse handler for: {}", synapse_type);
-        Ok(())
-    }
-
-    #[instrument(skip(self, handler), fields(%synapse_type))]
-    pub async fn register_async_synapse_handler(
-        &self,
-        synapse_type: String,
-        handler: Arc<dyn AsyncSynapseHandler>,
-    ) -> Result<()> {
-        let mut handlers = self.ctx.async_handlers.write().await;
-        handlers.insert(synapse_type.clone(), handler);
-        info!("Registered async synapse handler for: {}", synapse_type);
-        Ok(())
-    }
-
-    #[instrument(skip(self, handler), fields(%synapse_type))]
-    pub async fn register_streaming_handler(
-        &self,
-        synapse_type: String,
-        handler: Arc<dyn StreamingSynapseHandler>,
-    ) -> Result<()> {
-        let mut handlers = self.ctx.streaming_handlers.write().await;
-        handlers.insert(synapse_type.clone(), handler);
-        info!("Registered streaming synapse handler for: {}", synapse_type);
-        Ok(())
-    }
+    register_handler!(
+        register_synapse_handler,
+        synapse_handlers,
+        SynapseHandler,
+        "synapse"
+    );
+    register_handler!(
+        register_async_synapse_handler,
+        async_handlers,
+        AsyncSynapseHandler,
+        "async synapse"
+    );
+    register_handler!(
+        register_streaming_handler,
+        streaming_handlers,
+        StreamingSynapseHandler,
+        "streaming"
+    );
 
     #[allow(clippy::type_complexity)]
     fn create_self_signed_cert() -> std::result::Result<
@@ -335,9 +361,8 @@ impl LightningServer {
             loop {
                 interval.tick().await;
                 let now = unix_timestamp_secs();
-                let cutoff = now.saturating_sub(max_sig_age);
                 let mut nonces = nonces_for_cleanup.write().await;
-                nonces.retain(|_, ts| *ts >= cutoff);
+                evict_stale_nonces(&mut nonces, now, max_sig_age, None);
                 drop(nonces);
                 let rate_cutoff = now.saturating_sub(60);
                 let mut rates = rate_for_cleanup.write().await;
@@ -479,22 +504,20 @@ impl LightningServer {
         let mut connections = self.ctx.connections.write().await;
         let now = unix_timestamp_secs();
 
-        let mut to_remove = Vec::new();
-        for (validator, connection) in connections.iter() {
-            if now.saturating_sub(connection.last_activity.load(Ordering::Relaxed))
-                > max_idle_seconds
-            {
-                to_remove.push((validator.clone(), connection.connection.remote_address()));
-            }
-        }
+        let stale: Vec<String> = connections
+            .iter()
+            .filter(|(_, conn)| {
+                now.saturating_sub(conn.last_activity.load(Ordering::Relaxed)) > max_idle_seconds
+            })
+            .map(|(hotkey, _)| hotkey.clone())
+            .collect();
 
         let mut addr_index = self.ctx.addr_to_hotkey.write().await;
-        for (validator, remote_addr) in &to_remove {
-            if let Some(connection) = connections.remove(validator) {
-                connection.connection.close(0u32.into(), b"cleanup");
-                info!("Cleaned up stale connection from validator: {}", validator);
+        for hotkey in &stale {
+            if let Some(conn) = remove_hotkey_from_maps(&mut connections, &mut addr_index, hotkey) {
+                conn.connection.close(0u32.into(), b"cleanup");
+                info!("Cleaned up stale connection from validator: {}", hotkey);
             }
-            addr_index.remove(remote_addr);
         }
 
         Ok(())
@@ -510,9 +533,14 @@ impl LightningServer {
 
     #[instrument(skip(self))]
     pub async fn cleanup_expired_nonces(&self) {
+        let now = unix_timestamp_secs();
         let mut nonces = self.ctx.used_nonces.write().await;
-        let cutoff = unix_timestamp_secs().saturating_sub(self.ctx.config.max_signature_age_secs);
-        nonces.retain(|_, ts| *ts >= cutoff);
+        evict_stale_nonces(
+            &mut nonces,
+            now,
+            self.ctx.config.max_signature_age_secs,
+            None,
+        );
     }
 
     #[instrument(skip(self))]

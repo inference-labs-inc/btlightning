@@ -201,11 +201,12 @@ pub(super) async fn verify_validator_signature(
         }
         nonces.insert(request.nonce.clone(), current_time);
         if nonces.len() > max_nonce_entries {
-            let cutoff = current_time.saturating_sub(max_signature_age);
-            nonces.retain(|_, ts| *ts >= cutoff);
-            while nonces.len() > max_nonce_entries {
-                nonces.shift_remove_index(0);
-            }
+            super::evict_stale_nonces(
+                &mut nonces,
+                current_time,
+                max_signature_age,
+                Some(max_nonce_entries),
+            );
         }
     }
 

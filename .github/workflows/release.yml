@@ -6,6 +6,8 @@ on:
 
 permissions:
   contents: read
+  id-token: write
+  attestations: write
 
 env:
   VERSION: ${{ github.event.release.tag_name }}
@@ -16,16 +18,32 @@ jobs:
     runs-on: ubuntu-latest
     environment: release
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
+        with:
+          toolchain: 1.88.0
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
 
-      - uses: inference-labs-inc/set-toml-version@v1
+      - uses: inference-labs-inc/set-toml-version@ff9a4b64df4ce91067737822d2811a69597bf688 # v1
         with:
           version: ${{ github.event.release.tag_name }}
           files: crates/btlightning/Cargo.toml
+
+      - name: Verify only version fields changed
+        run: |
+          git diff --name-only | sort > /tmp/changed.txt
+          echo "crates/btlightning/Cargo.toml" | sort > /tmp/expected.txt
+          diff /tmp/changed.txt /tmp/expected.txt
+
+      - name: Package btlightning
+        run: cargo package -p btlightning --all-features --allow-dirty
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: target/package/btlightning-*.crate
 
       - name: Publish btlightning
         run: cargo publish -p btlightning --all-features --allow-dirty
@@ -50,9 +68,9 @@ jobs:
             zig: false
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - uses: inference-labs-inc/set-toml-version@v1
+      - uses: inference-labs-inc/set-toml-version@ff9a4b64df4ce91067737822d2811a69597bf688 # v1
         with:
           version: ${{ github.event.release.tag_name }}
           files: |
@@ -60,12 +78,18 @@ jobs:
             crates/btlightning-py/Cargo.toml
             crates/btlightning-py/pyproject.toml
 
-      - uses: actions/setup-python@v6
+      - name: Verify only version fields changed
+        run: |
+          git diff --name-only | sort > /tmp/changed.txt
+          printf 'crates/btlightning-py/Cargo.toml\ncrates/btlightning-py/pyproject.toml\ncrates/btlightning/Cargo.toml\n' | sort > /tmp/expected.txt
+          diff /tmp/changed.txt /tmp/expected.txt
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         with:
           python-version: "3.12"
 
       - name: Build wheels
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@b1bd829e37fef14c63f19162034228a2f3dc1021 # v1
         with:
           target: ${{ matrix.target }}
           args: --release --out dist ${{ matrix.zig && '--zig' || '' }} ${{ matrix.target == 'aarch64' && matrix.os == 'ubuntu-latest' && '-i python3.12' || '' }}
@@ -75,7 +99,7 @@ jobs:
           RUSTFLAGS: ${{ startsWith(matrix.os, 'macos') && '-C link-arg=-undefined -C link-arg=dynamic_lookup' || '' }}
 
       - name: Upload wheels
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: wheels-${{ matrix.os }}-${{ matrix.target }}
           path: crates/btlightning-py/dist
@@ -84,9 +108,9 @@ jobs:
     name: Build sdist
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - uses: inference-labs-inc/set-toml-version@v1
+      - uses: inference-labs-inc/set-toml-version@ff9a4b64df4ce91067737822d2811a69597bf688 # v1
         with:
           version: ${{ github.event.release.tag_name }}
           files: |
@@ -94,15 +118,21 @@ jobs:
             crates/btlightning-py/Cargo.toml
             crates/btlightning-py/pyproject.toml
 
+      - name: Verify only version fields changed
+        run: |
+          git diff --name-only | sort > /tmp/changed.txt
+          printf 'crates/btlightning-py/Cargo.toml\ncrates/btlightning-py/pyproject.toml\ncrates/btlightning/Cargo.toml\n' | sort > /tmp/expected.txt
+          diff /tmp/changed.txt /tmp/expected.txt
+
       - name: Build sdist
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@b1bd829e37fef14c63f19162034228a2f3dc1021 # v1
         with:
           command: sdist
           args: --out dist
           working-directory: crates/btlightning-py
 
       - name: Upload sdist
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: sdist
           path: crates/btlightning-py/dist
@@ -116,19 +146,20 @@ jobs:
       id-token: write
     steps:
       - name: Download wheel artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           pattern: wheels-*
           path: dist
           merge-multiple: true
 
       - name: Download sdist
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: sdist
           path: dist
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # release/v1
         with:
           packages-dir: dist/
+          attestations: true

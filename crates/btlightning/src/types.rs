@@ -13,26 +13,15 @@ pub struct QuicAxonInfo {
     pub ip: String,
     pub port: u16,
     pub protocol: u8,
-    pub placeholder1: u8,
-    pub placeholder2: u8,
 }
 
 impl QuicAxonInfo {
-    pub fn new(
-        hotkey: String,
-        ip: String,
-        port: u16,
-        protocol: u8,
-        placeholder1: u8,
-        placeholder2: u8,
-    ) -> Self {
+    pub fn new(hotkey: String, ip: String, port: u16, protocol: u8) -> Self {
         Self {
             hotkey,
             ip,
             port,
             protocol,
-            placeholder1,
-            placeholder2,
         }
     }
 
