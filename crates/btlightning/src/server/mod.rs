@@ -681,6 +681,147 @@ mod tests {
     use base64::{prelude::BASE64_STANDARD, Engine};
     use sp_core::{crypto::Ss58Codec, Pair};
 
+    #[test]
+    fn evict_stale_nonces_trims_to_hard_cap() {
+        let now = unix_timestamp_secs();
+        let mut nonces = IndexMap::new();
+        for i in 0..5 {
+            nonces.insert(format!("nonce_{}", i), now);
+        }
+        evict_stale_nonces(&mut nonces, now, 300, Some(3));
+        assert_eq!(nonces.len(), 3);
+        assert!(!nonces.contains_key("nonce_0"));
+        assert!(!nonces.contains_key("nonce_1"));
+        assert!(nonces.contains_key("nonce_2"));
+        assert!(nonces.contains_key("nonce_3"));
+        assert!(nonces.contains_key("nonce_4"));
+    }
+
+    #[test]
+    fn evict_stale_nonces_removes_expired_before_cap() {
+        let now = 1000;
+        let mut nonces = IndexMap::new();
+        nonces.insert("old".to_string(), 600);
+        nonces.insert("recent".to_string(), 800);
+        evict_stale_nonces(&mut nonces, now, 300, Some(10));
+        assert_eq!(nonces.len(), 1);
+        assert!(nonces.contains_key("recent"));
+    }
+
+    #[test]
+    fn evict_stale_nonces_boundary_removes_exact_cutoff() {
+        let now = 1000;
+        let mut nonces = IndexMap::new();
+        nonces.insert("at_cutoff".to_string(), 700);
+        nonces.insert("after_cutoff".to_string(), 701);
+        evict_stale_nonces(&mut nonces, now, 300, None);
+        assert_eq!(nonces.len(), 1);
+        assert!(nonces.contains_key("after_cutoff"));
+    }
+
+    #[tokio::test]
+    async fn remove_hotkey_from_maps_cleans_both() {
+        let (server_endpoint, server_addr) = {
+            let (certs, key, _) = LightningServer::create_self_signed_cert().unwrap();
+            let server_crypto = RustlsServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(certs, key)
+                .unwrap();
+            let quic_crypto =
+                quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto).unwrap();
+            let server_config = ServerConfig::with_crypto(Arc::new(quic_crypto));
+            let ep = Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
+            let addr = ep.local_addr().unwrap();
+            (ep, addr)
+        };
+
+        let client_endpoint = {
+            use rustls::client::danger::{
+                HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+            };
+            use rustls::pki_types::{CertificateDer as RustlsCert, ServerName, UnixTime};
+            use rustls::ClientConfig as RustlsClientConfig;
+            use rustls::{DigitallySignedStruct, Error as TlsError, SignatureScheme};
+
+            #[derive(Debug)]
+            struct InsecureVerifier;
+            impl ServerCertVerifier for InsecureVerifier {
+                fn verify_server_cert(
+                    &self,
+                    _: &RustlsCert<'_>,
+                    _: &[RustlsCert<'_>],
+                    _: &ServerName<'_>,
+                    _: &[u8],
+                    _: UnixTime,
+                ) -> std::result::Result<ServerCertVerified, TlsError> {
+                    Ok(ServerCertVerified::assertion())
+                }
+                fn verify_tls12_signature(
+                    &self,
+                    _: &[u8],
+                    _: &RustlsCert<'_>,
+                    _: &DigitallySignedStruct,
+                ) -> std::result::Result<HandshakeSignatureValid, TlsError> {
+                    Err(TlsError::PeerIncompatible(
+                        rustls::PeerIncompatible::Tls12NotOffered,
+                    ))
+                }
+                fn verify_tls13_signature(
+                    &self,
+                    _: &[u8],
+                    _: &RustlsCert<'_>,
+                    _: &DigitallySignedStruct,
+                ) -> std::result::Result<HandshakeSignatureValid, TlsError> {
+                    Ok(HandshakeSignatureValid::assertion())
+                }
+                fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+                    vec![
+                        SignatureScheme::ECDSA_NISTP256_SHA256,
+                        SignatureScheme::ECDSA_NISTP384_SHA384,
+                        SignatureScheme::ED25519,
+                    ]
+                }
+            }
+
+            let tls = RustlsClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(InsecureVerifier))
+                .with_no_client_auth();
+            let client_crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls).unwrap();
+            let mut ep = Endpoint::client("0.0.0.0:0".parse().unwrap()).unwrap();
+            ep.set_default_client_config(quinn::ClientConfig::new(Arc::new(client_crypto)));
+            ep
+        };
+
+        let server_task = tokio::spawn(async move {
+            let incoming = server_endpoint.accept().await.unwrap();
+            Arc::new(incoming.await.unwrap())
+        });
+
+        let client_conn = client_endpoint
+            .connect(server_addr, "localhost")
+            .unwrap()
+            .await
+            .unwrap();
+        let server_conn = server_task.await.unwrap();
+
+        let remote_addr = server_conn.remote_address();
+        let hotkey = "test_validator".to_string();
+
+        let mut connections = HashMap::new();
+        let mut addr_to_hotkey = HashMap::new();
+        let vc = ValidatorConnection::new(hotkey.clone(), "conn_1".into(), server_conn);
+        addr_to_hotkey.insert(remote_addr, hotkey.clone());
+        connections.insert(hotkey.clone(), vc);
+
+        let removed = remove_hotkey_from_maps(&mut connections, &mut addr_to_hotkey, &hotkey);
+        assert!(removed.is_some());
+        assert!(connections.is_empty());
+        assert!(!addr_to_hotkey.contains_key(&remote_addr));
+
+        client_conn.close(0u32.into(), b"done");
+    }
+
     fn test_server_context(config: LightningServerConfig) -> ServerContext {
         ServerContext {
             connections: Arc::new(RwLock::new(HashMap::new())),
