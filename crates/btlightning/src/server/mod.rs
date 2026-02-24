@@ -303,6 +303,16 @@ impl LightningServer {
         let endpoint = self.endpoint.as_ref().ok_or_else(|| {
             LightningError::Config("server not started: call start() first".to_string())
         })?;
+        if self.ctx.config.require_validator_permit {
+            if self.ctx.permit_resolver.is_none() {
+                return Err(LightningError::Config(
+                    "require_validator_permit is enabled but no ValidatorPermitResolver is configured".to_string(),
+                ));
+            }
+        } else {
+            info!("Validator permit checking is disabled -- any hotkey with a valid signature can connect");
+        }
+
         {
             let mut guard = self.cleanup_handle.lock().await;
             if let Some(old) = guard.take() {
@@ -333,16 +343,6 @@ impl LightningServer {
             }
         });
         *self.cleanup_handle.lock().await = Some(handle);
-
-        if self.ctx.config.require_validator_permit {
-            if self.ctx.permit_resolver.is_none() {
-                return Err(LightningError::Config(
-                    "require_validator_permit is enabled but no ValidatorPermitResolver is configured".to_string(),
-                ));
-            }
-        } else {
-            info!("Validator permit checking is disabled -- any hotkey with a valid signature can connect");
-        }
 
         {
             let mut guard = self.permit_refresh_handle.lock().await;
