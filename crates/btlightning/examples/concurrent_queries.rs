@@ -32,7 +32,11 @@ async fn spawn_miner(seed: [u8; 32]) -> anyhow::Result<(Arc<LightningServer>, St
     let port = server.local_addr()?.port();
     let server = Arc::new(server);
     let s = server.clone();
-    tokio::spawn(async move { s.serve_forever().await });
+    tokio::spawn(async move {
+        if let Err(e) = s.serve_forever().await {
+            eprintln!("serve_forever exited: {e:?}");
+        }
+    });
     Ok((server, hotkey, port))
 }
 
@@ -81,10 +85,13 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    while let Some(Ok((hotkey_prefix, result))) = tasks.join_next().await {
-        match result {
-            Ok(resp) => println!("miner {hotkey_prefix}: success={}", resp.success),
-            Err(e) => println!("miner {hotkey_prefix}: error={e}"),
+    while let Some(res) = tasks.join_next().await {
+        match res {
+            Ok((hotkey_prefix, Ok(resp))) => {
+                println!("miner {hotkey_prefix}: success={}", resp.success)
+            }
+            Ok((hotkey_prefix, Err(e))) => println!("miner {hotkey_prefix}: error={e}"),
+            Err(join_err) => eprintln!("task panicked: {join_err}"),
         }
     }
 

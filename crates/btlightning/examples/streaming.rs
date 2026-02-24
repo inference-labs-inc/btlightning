@@ -55,7 +55,11 @@ async fn main() -> anyhow::Result<()> {
 
     let server = Arc::new(server);
     let s = server.clone();
-    tokio::spawn(async move { s.serve_forever().await });
+    tokio::spawn(async move {
+        if let Err(e) = s.serve_forever().await {
+            eprintln!("serve_forever exited: {e:?}");
+        }
+    });
 
     let mut client = LightningClient::new(validator_hotkey);
     client.set_signer(Box::new(Sr25519Signer::from_seed(VALIDATOR_SEED)));
