@@ -62,6 +62,23 @@ client.initialize_connections(vec![
 ]).await?;
 ```
 
+Send a request and deserialize the response:
+
+```rust,ignore
+use btlightning::QuicRequest;
+use serde::{Serialize, Deserialize};
+
+#[derive(Serialize)]
+struct MyQuery { prompt: String }
+
+#[derive(Deserialize)]
+struct MyResult { answer: String }
+
+let request = QuicRequest::from_typed("MyQuery", &MyQuery { prompt: "hello".into() })?;
+let response = client.query_axon(axon_info, request).await?.into_result()?;
+let result: MyResult = response.deserialize_data()?;
+```
+
 ## Build from source
 
 ```bash
