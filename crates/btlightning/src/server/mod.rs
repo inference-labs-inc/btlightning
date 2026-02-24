@@ -98,6 +98,34 @@ impl ValidatorConnection {
     }
 }
 
+pub(super) fn evict_stale_nonces(
+    nonces: &mut IndexMap<String, u64>,
+    now: u64,
+    max_age: u64,
+    hard_cap: Option<usize>,
+) {
+    let cutoff = now.saturating_sub(max_age);
+    nonces.retain(|_, ts| *ts > cutoff);
+    if let Some(cap) = hard_cap {
+        while nonces.len() > cap {
+            nonces.shift_remove_index(0);
+        }
+    }
+}
+
+pub(super) fn remove_hotkey_from_maps(
+    connections: &mut HashMap<String, ValidatorConnection>,
+    addr_to_hotkey: &mut HashMap<SocketAddr, String>,
+    hotkey: &str,
+) -> Option<ValidatorConnection> {
+    if let Some(conn) = connections.remove(hotkey) {
+        addr_to_hotkey.remove(&conn.connection.remote_address());
+        Some(conn)
+    } else {
+        None
+    }
+}
+
 #[derive(Clone)]
 struct ServerContext {
     connections: Arc<RwLock<HashMap<String, ValidatorConnection>>>,
@@ -122,6 +150,21 @@ pub struct LightningServer {
     endpoint: Option<Endpoint>,
     cleanup_handle: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
     permit_refresh_handle: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
+}
+
+macro_rules! register_handler {
+    ($method:ident, $field:ident, $trait:ident, $label:expr) => {
+        #[instrument(skip(self, handler), fields(%synapse_type))]
+        pub async fn $method(&self, synapse_type: String, handler: Arc<dyn $trait>) -> Result<()> {
+            let mut handlers = self.ctx.$field.write().await;
+            handlers.insert(synapse_type.clone(), handler);
+            info!(
+                concat!("Registered ", $label, " handler for: {}"),
+                synapse_type
+            );
+            Ok(())
+        }
+    };
 }
 
 impl LightningServer {
@@ -184,41 +227,24 @@ impl LightningServer {
         Ok(())
     }
 
-    #[instrument(skip(self, handler), fields(%synapse_type))]
-    pub async fn register_synapse_handler(
-        &self,
-        synapse_type: String,
-        handler: Arc<dyn SynapseHandler>,
-    ) -> Result<()> {
-        let mut handlers = self.ctx.synapse_handlers.write().await;
-        handlers.insert(synapse_type.clone(), handler);
-        info!("Registered synapse handler for: {}", synapse_type);
-        Ok(())
-    }
-
-    #[instrument(skip(self, handler), fields(%synapse_type))]
-    pub async fn register_async_synapse_handler(
-        &self,
-        synapse_type: String,
-        handler: Arc<dyn AsyncSynapseHandler>,
-    ) -> Result<()> {
-        let mut handlers = self.ctx.async_handlers.write().await;
-        handlers.insert(synapse_type.clone(), handler);
-        info!("Registered async synapse handler for: {}", synapse_type);
-        Ok(())
-    }
-
-    #[instrument(skip(self, handler), fields(%synapse_type))]
-    pub async fn register_streaming_handler(
-        &self,
-        synapse_type: String,
-        handler: Arc<dyn StreamingSynapseHandler>,
-    ) -> Result<()> {
-        let mut handlers = self.ctx.streaming_handlers.write().await;
-        handlers.insert(synapse_type.clone(), handler);
-        info!("Registered streaming synapse handler for: {}", synapse_type);
-        Ok(())
-    }
+    register_handler!(
+        register_synapse_handler,
+        synapse_handlers,
+        SynapseHandler,
+        "synapse"
+    );
+    register_handler!(
+        register_async_synapse_handler,
+        async_handlers,
+        AsyncSynapseHandler,
+        "async synapse"
+    );
+    register_handler!(
+        register_streaming_handler,
+        streaming_handlers,
+        StreamingSynapseHandler,
+        "streaming"
+    );
 
     #[allow(clippy::type_complexity)]
     fn create_self_signed_cert() -> std::result::Result<
@@ -335,9 +361,8 @@ impl LightningServer {
             loop {
                 interval.tick().await;
                 let now = unix_timestamp_secs();
-                let cutoff = now.saturating_sub(max_sig_age);
                 let mut nonces = nonces_for_cleanup.write().await;
-                nonces.retain(|_, ts| *ts >= cutoff);
+                evict_stale_nonces(&mut nonces, now, max_sig_age, None);
                 drop(nonces);
                 let rate_cutoff = now.saturating_sub(60);
                 let mut rates = rate_for_cleanup.write().await;
@@ -479,22 +504,28 @@ impl LightningServer {
         let mut connections = self.ctx.connections.write().await;
         let now = unix_timestamp_secs();
 
-        let mut to_remove = Vec::new();
-        for (validator, connection) in connections.iter() {
-            if now.saturating_sub(connection.last_activity.load(Ordering::Relaxed))
-                > max_idle_seconds
-            {
-                to_remove.push((validator.clone(), connection.connection.remote_address()));
-            }
-        }
+        let stale: Vec<String> = connections
+            .iter()
+            .filter(|(_, conn)| {
+                now.saturating_sub(conn.last_activity.load(Ordering::Relaxed)) > max_idle_seconds
+            })
+            .map(|(hotkey, _)| hotkey.clone())
+            .collect();
 
         let mut addr_index = self.ctx.addr_to_hotkey.write().await;
-        for (validator, remote_addr) in &to_remove {
-            if let Some(connection) = connections.remove(validator) {
-                connection.connection.close(0u32.into(), b"cleanup");
-                info!("Cleaned up stale connection from validator: {}", validator);
-            }
-            addr_index.remove(remote_addr);
+        let removed: Vec<(String, ValidatorConnection)> = stale
+            .iter()
+            .filter_map(|hotkey| {
+                remove_hotkey_from_maps(&mut connections, &mut addr_index, hotkey)
+                    .map(|conn| (hotkey.clone(), conn))
+            })
+            .collect();
+        drop(addr_index);
+        drop(connections);
+
+        for (hotkey, conn) in removed {
+            conn.connection.close(0u32.into(), b"cleanup");
+            info!("Cleaned up stale connection from validator: {}", hotkey);
         }
 
         Ok(())
@@ -510,9 +541,14 @@ impl LightningServer {
 
     #[instrument(skip(self))]
     pub async fn cleanup_expired_nonces(&self) {
+        let now = unix_timestamp_secs();
         let mut nonces = self.ctx.used_nonces.write().await;
-        let cutoff = unix_timestamp_secs().saturating_sub(self.ctx.config.max_signature_age_secs);
-        nonces.retain(|_, ts| *ts >= cutoff);
+        evict_stale_nonces(
+            &mut nonces,
+            now,
+            self.ctx.config.max_signature_age_secs,
+            None,
+        );
     }
 
     #[instrument(skip(self))]
@@ -644,6 +680,147 @@ mod tests {
     use crate::types::HandshakeRequest;
     use base64::{prelude::BASE64_STANDARD, Engine};
     use sp_core::{crypto::Ss58Codec, Pair};
+
+    #[test]
+    fn evict_stale_nonces_trims_to_hard_cap() {
+        let now = unix_timestamp_secs();
+        let mut nonces = IndexMap::new();
+        for i in 0..5 {
+            nonces.insert(format!("nonce_{}", i), now);
+        }
+        evict_stale_nonces(&mut nonces, now, 300, Some(3));
+        assert_eq!(nonces.len(), 3);
+        assert!(!nonces.contains_key("nonce_0"));
+        assert!(!nonces.contains_key("nonce_1"));
+        assert!(nonces.contains_key("nonce_2"));
+        assert!(nonces.contains_key("nonce_3"));
+        assert!(nonces.contains_key("nonce_4"));
+    }
+
+    #[test]
+    fn evict_stale_nonces_removes_expired_before_cap() {
+        let now = 1000;
+        let mut nonces = IndexMap::new();
+        nonces.insert("old".to_string(), 600);
+        nonces.insert("recent".to_string(), 800);
+        evict_stale_nonces(&mut nonces, now, 300, Some(10));
+        assert_eq!(nonces.len(), 1);
+        assert!(nonces.contains_key("recent"));
+    }
+
+    #[test]
+    fn evict_stale_nonces_boundary_removes_exact_cutoff() {
+        let now = 1000;
+        let mut nonces = IndexMap::new();
+        nonces.insert("at_cutoff".to_string(), 700);
+        nonces.insert("after_cutoff".to_string(), 701);
+        evict_stale_nonces(&mut nonces, now, 300, None);
+        assert_eq!(nonces.len(), 1);
+        assert!(nonces.contains_key("after_cutoff"));
+    }
+
+    #[tokio::test]
+    async fn remove_hotkey_from_maps_cleans_both() {
+        let (server_endpoint, server_addr) = {
+            let (certs, key, _) = LightningServer::create_self_signed_cert().unwrap();
+            let server_crypto = RustlsServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(certs, key)
+                .unwrap();
+            let quic_crypto =
+                quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto).unwrap();
+            let server_config = ServerConfig::with_crypto(Arc::new(quic_crypto));
+            let ep = Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
+            let addr = ep.local_addr().unwrap();
+            (ep, addr)
+        };
+
+        let client_endpoint = {
+            use rustls::client::danger::{
+                HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+            };
+            use rustls::pki_types::{CertificateDer as RustlsCert, ServerName, UnixTime};
+            use rustls::ClientConfig as RustlsClientConfig;
+            use rustls::{DigitallySignedStruct, Error as TlsError, SignatureScheme};
+
+            #[derive(Debug)]
+            struct InsecureVerifier;
+            impl ServerCertVerifier for InsecureVerifier {
+                fn verify_server_cert(
+                    &self,
+                    _: &RustlsCert<'_>,
+                    _: &[RustlsCert<'_>],
+                    _: &ServerName<'_>,
+                    _: &[u8],
+                    _: UnixTime,
+                ) -> std::result::Result<ServerCertVerified, TlsError> {
+                    Ok(ServerCertVerified::assertion())
+                }
+                fn verify_tls12_signature(
+                    &self,
+                    _: &[u8],
+                    _: &RustlsCert<'_>,
+                    _: &DigitallySignedStruct,
+                ) -> std::result::Result<HandshakeSignatureValid, TlsError> {
+                    Err(TlsError::PeerIncompatible(
+                        rustls::PeerIncompatible::Tls12NotOffered,
+                    ))
+                }
+                fn verify_tls13_signature(
+                    &self,
+                    _: &[u8],
+                    _: &RustlsCert<'_>,
+                    _: &DigitallySignedStruct,
+                ) -> std::result::Result<HandshakeSignatureValid, TlsError> {
+                    Ok(HandshakeSignatureValid::assertion())
+                }
+                fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+                    vec![
+                        SignatureScheme::ECDSA_NISTP256_SHA256,
+                        SignatureScheme::ECDSA_NISTP384_SHA384,
+                        SignatureScheme::ED25519,
+                    ]
+                }
+            }
+
+            let tls = RustlsClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(InsecureVerifier))
+                .with_no_client_auth();
+            let client_crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls).unwrap();
+            let mut ep = Endpoint::client("0.0.0.0:0".parse().unwrap()).unwrap();
+            ep.set_default_client_config(quinn::ClientConfig::new(Arc::new(client_crypto)));
+            ep
+        };
+
+        let server_task = tokio::spawn(async move {
+            let incoming = server_endpoint.accept().await.unwrap();
+            Arc::new(incoming.await.unwrap())
+        });
+
+        let client_conn = client_endpoint
+            .connect(server_addr, "localhost")
+            .unwrap()
+            .await
+            .unwrap();
+        let server_conn = server_task.await.unwrap();
+
+        let remote_addr = server_conn.remote_address();
+        let hotkey = "test_validator".to_string();
+
+        let mut connections = HashMap::new();
+        let mut addr_to_hotkey = HashMap::new();
+        let vc = ValidatorConnection::new(hotkey.clone(), "conn_1".into(), server_conn);
+        addr_to_hotkey.insert(remote_addr, hotkey.clone());
+        connections.insert(hotkey.clone(), vc);
+
+        let removed = remove_hotkey_from_maps(&mut connections, &mut addr_to_hotkey, &hotkey);
+        assert!(removed.is_some());
+        assert!(connections.is_empty());
+        assert!(!addr_to_hotkey.contains_key(&remote_addr));
+
+        client_conn.close(0u32.into(), b"done");
+    }
 
     fn test_server_context(config: LightningServerConfig) -> ServerContext {
         ServerContext {

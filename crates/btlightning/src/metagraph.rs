@@ -261,8 +261,6 @@ impl Metagraph {
                     n.axon_ip.clone(),
                     n.axon_port,
                     n.axon_protocol,
-                    0,
-                    0,
                 )
             })
             .collect()

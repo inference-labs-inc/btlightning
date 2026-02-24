@@ -37,8 +37,7 @@ pub(super) async fn handle_connection(connection: Connection, ctx: ServerContext
     if let Some(hotkey) = addr_index.get(&remote_addr).cloned() {
         if let Some(existing) = connections.get(&hotkey) {
             if Arc::ptr_eq(&existing.connection, &connection) {
-                connections.remove(&hotkey);
-                addr_index.remove(&remote_addr);
+                super::remove_hotkey_from_maps(&mut connections, &mut addr_index, &hotkey);
                 cleaned = true;
             }
         }
@@ -53,8 +52,7 @@ pub(super) async fn handle_connection(connection: Connection, ctx: ServerContext
                 "Stale connection cleanup via fallback scan for validator: {}",
                 hotkey
             );
-            connections.remove(&hotkey);
-            addr_index.retain(|_, v| v != &hotkey);
+            super::remove_hotkey_from_maps(&mut connections, &mut addr_index, &hotkey);
         }
     }
     drop(addr_index);

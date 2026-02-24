@@ -1551,7 +1551,9 @@ impl ServerCertVerifier for AcceptAnyCertVerifier {
         _cert: &CertificateDer<'_>,
         _dss: &rustls::DigitallySignedStruct,
     ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
+        Err(rustls::Error::PeerIncompatible(
+            rustls::PeerIncompatible::Tls12NotOffered,
+        ))
     }
 
     fn verify_tls13_signature(
