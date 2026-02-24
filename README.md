@@ -62,7 +62,7 @@ client.initialize_connections(vec![
 ]).await?;
 ```
 
-Send a request and deserialize the response:
+Query a single miner by axon info and deserialize the response:
 
 ```rust,ignore
 use btlightning::QuicRequest;
@@ -77,6 +77,28 @@ struct MyResult { answer: String }
 let request = QuicRequest::from_typed("MyQuery", &MyQuery { prompt: "hello".into() })?;
 let response = client.query_axon(axon_info, request).await?.into_result()?;
 let result: MyResult = response.deserialize_data()?;
+```
+
+Fan out to every QUIC miner on the subnet concurrently:
+
+```rust,ignore
+use tokio::task::JoinSet;
+
+let miners = metagraph.quic_miners();
+let mut tasks = JoinSet::new();
+for miner in miners {
+    let req = QuicRequest::from_typed("MyQuery", &MyQuery { prompt: "hello".into() })?;
+    let client = &client;
+    tasks.spawn(async move {
+        (miner.hotkey.clone(), client.query_axon(miner, req).await)
+    });
+}
+while let Some(Ok((hotkey, result))) = tasks.join_next().await {
+    match result {
+        Ok(resp) => { /* handle response from hotkey */ }
+        Err(e) => { /* miner failed */ }
+    }
+}
 ```
 
 ## Build from source
