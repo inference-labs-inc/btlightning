@@ -41,7 +41,7 @@ async fn main() -> anyhow::Result<()> {
 
     let server = Arc::new(server);
     let s = server.clone();
-    tokio::spawn(async move {
+    let serve_handle = tokio::spawn(async move {
         if let Err(e) = s.serve_forever().await {
             eprintln!("serve_forever exited: {e:?}");
         }
@@ -76,5 +76,8 @@ async fn main() -> anyhow::Result<()> {
 
     client.close_all_connections().await?;
     server.stop().await?;
+    if let Err(e) = serve_handle.await {
+        eprintln!("serve_forever panicked: {e:?}");
+    }
     Ok(())
 }
