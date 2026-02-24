@@ -4,6 +4,7 @@ version = "0.1.0"
 authors = ["Inference Labs Inc"]
 description = "QUIC transport layer for Bittensor"
 license = "MIT"
+readme = "../../README.md"
 repository = "https://github.com/inference-labs-inc/lightning"
 edition = "2021"
 rust-version = "1.88"
@@ -38,6 +39,10 @@ proptest = "1"
 btwallet = ["bittensor_wallet"]
 subtensor = ["dep:subxt", "dep:parity-scale-codec", "dep:futures-util"]
 subtensor-tests = ["subtensor"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies.subxt]
 version = "0.38"
