@@ -11,6 +11,27 @@ env:
   VERSION: ${{ github.event.release.tag_name }}
 
 jobs:
+  publish-crates-io:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Set version from tag
+        run: |
+          V="${VERSION#v}"
+          sed -i "s/^version = \".*\"/version = \"$V\"/" crates/btlightning/Cargo.toml
+
+      - name: Publish btlightning
+        run: cargo publish -p btlightning --all-features --allow-dirty
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
   build-wheels:
     name: Build wheels - ${{ matrix.os }} ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
@@ -107,4 +128,3 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
-
