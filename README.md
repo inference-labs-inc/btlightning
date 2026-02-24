@@ -33,8 +33,24 @@ response = client.query_axon(
 
 ```toml
 [dependencies]
-btlightning = "0.1"
+btlightning = { version = "0.1", features = ["subtensor"] }
 ```
+
+With the `subtensor` feature, the client discovers miners from the metagraph and keeps connections in sync automatically:
+
+```rust,ignore
+use btlightning::{LightningClient, LightningClientConfig, Sr25519Signer, MetagraphMonitorConfig};
+
+let config = LightningClientConfig {
+    metagraph: Some(MetagraphMonitorConfig::finney(YOUR_NETUID)),
+    ..Default::default()
+};
+let mut client = LightningClient::with_config("5GrwvaEF...".into(), config)?;
+client.set_signer(Box::new(Sr25519Signer::from_seed(seed)));
+client.initialize_connections(vec![]).await?;
+```
+
+Without `subtensor`, pass miner addresses directly:
 
 ```rust,ignore
 use btlightning::{LightningClient, Sr25519Signer, QuicAxonInfo};
