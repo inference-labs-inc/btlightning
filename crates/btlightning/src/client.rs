@@ -717,6 +717,12 @@ impl LightningClient {
         &self,
         monitor_config: MetagraphMonitorConfig,
     ) -> Result<()> {
+        if monitor_config.sync_interval.is_zero() {
+            return Err(LightningError::Config(
+                "sync_interval must be non-zero".into(),
+            ));
+        }
+
         self.stop_metagraph_monitor().await;
 
         let endpoint = self
@@ -767,11 +773,6 @@ impl LightningClient {
         let wallet_hotkey = self.wallet_hotkey.clone();
         let config = self.config.clone();
         let sync_interval = monitor_config.sync_interval;
-        if sync_interval.is_zero() {
-            return Err(LightningError::Config(
-                "sync_interval must be non-zero".into(),
-            ));
-        }
         let subtensor_url = monitor_config.subtensor_endpoint.clone();
 
         let handle = tokio::spawn(async move {
