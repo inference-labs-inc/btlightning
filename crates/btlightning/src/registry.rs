@@ -48,6 +48,7 @@ impl MinerRegistry {
                     hotkeys.remove(&hotkey);
                     if hotkeys.is_empty() {
                         self.addr_to_hotkeys.remove(&old_addr_key);
+                        self.reconnect_states.remove(&old_addr_key);
                     }
                 }
             }
@@ -127,6 +128,11 @@ impl MinerRegistry {
 
     pub fn connection_addrs(&self) -> impl Iterator<Item = &PeerAddr> {
         self.established_connections.keys()
+    }
+
+    #[cfg(test)]
+    pub fn reconnect_state(&self, addr: &PeerAddr) -> Option<&ReconnectState> {
+        self.reconnect_states.get(addr)
     }
 
     pub fn reconnect_state_or_insert(&mut self, addr: PeerAddr) -> &mut ReconnectState {
@@ -217,7 +223,7 @@ mod tests {
         (
             "[a-z]{4,8}",
             (1u8..=254, 0u8..=255, 0u8..=255, 1u8..=254),
-            1024u16..65535,
+            1024u16..=65535,
         )
             .prop_map(|(hotkey, (a, b, c, d), port)| {
                 let ip = format!("{}.{}.{}.{}", a, b, c, d);
@@ -303,6 +309,20 @@ mod tests {
                 .unwrap_or(max);
             prop_assert!(backoff <= max);
         }
+    }
+
+    #[test]
+    fn register_address_change_purges_stale_reconnect_state() {
+        let mut reg = MinerRegistry::new();
+        let old_addr = PeerAddr::new("1.2.3.4", 8080);
+        reg.register(QuicAxonInfo::new("hk1".into(), "1.2.3.4".into(), 8080, 4));
+        let rs = reg.reconnect_state_or_insert(old_addr.clone());
+        rs.attempts = 3;
+        assert!(reg.reconnect_state(&old_addr).is_some());
+
+        reg.register(QuicAxonInfo::new("hk1".into(), "5.6.7.8".into(), 9090, 4));
+        assert!(reg.reconnect_state(&old_addr).is_none());
+        reg.assert_invariants();
     }
 
     #[test]
