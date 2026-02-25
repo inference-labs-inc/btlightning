@@ -67,6 +67,7 @@ impl MinerRegistry {
                 hotkeys.remove(hotkey);
                 if hotkeys.is_empty() {
                     self.addr_to_hotkeys.remove(&addr_key);
+                    self.reconnect_states.remove(&addr_key);
                 }
             }
             Some(miner)
