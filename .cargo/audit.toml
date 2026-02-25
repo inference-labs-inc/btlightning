@@ -13,7 +13,7 @@ ignore = [
     # proc-macro-error 1.0.4 — unmaintained. Lockfile phantom from subxt -> polkadot-sdk -> aquamarine/alloy-sol-macro. Not compiled by btlightning.
     "RUSTSEC-2024-0370",
 
-    # sodiumoxide 0.2.7 — deprecated. Pulled by btwallet (upstream). Remove when btwallet migrates to a maintained crypto library.
+    # sodiumoxide 0.2.7 — deprecated but actively compiled via btwallet (not a lockfile phantom). Remove when btwallet migrates to a maintained crypto library.
     "RUSTSEC-2021-0137",
 
     # lru 0.8.1/0.12.5 — unsound IterMut. Lockfile phantoms from polkadot-sdk (parity-util-mem) and subxt (smoldot-light). Not compiled by btlightning.
