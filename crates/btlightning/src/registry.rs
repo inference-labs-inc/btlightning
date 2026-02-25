@@ -6,6 +6,7 @@ use tokio::time::Instant;
 pub(crate) struct ReconnectState {
     pub attempts: u32,
     pub next_retry_at: Instant,
+    pub in_progress: bool,
 }
 
 #[derive(Default)]
@@ -112,17 +113,40 @@ impl MinerRegistry {
         self.established_connections.keys()
     }
 
-    pub fn reconnect_state(&self, addr: &PeerAddr) -> Option<&ReconnectState> {
-        self.reconnect_states.get(addr)
-    }
-
     pub fn reconnect_state_or_insert(&mut self, addr: PeerAddr) -> &mut ReconnectState {
         self.reconnect_states
             .entry(addr)
             .or_insert_with(|| ReconnectState {
                 attempts: 0,
                 next_retry_at: Instant::now(),
+                in_progress: false,
             })
+    }
+
+    pub fn try_start_reconnect(
+        &mut self,
+        addr: PeerAddr,
+        max_retries: u32,
+    ) -> std::result::Result<(), (u32, Option<Instant>)> {
+        let rs = self
+            .reconnect_states
+            .entry(addr)
+            .or_insert_with(|| ReconnectState {
+                attempts: 0,
+                next_retry_at: Instant::now(),
+                in_progress: false,
+            });
+        if rs.in_progress {
+            return Err((rs.attempts, None));
+        }
+        if rs.attempts >= max_retries {
+            return Err((rs.attempts, None));
+        }
+        if Instant::now() < rs.next_retry_at {
+            return Err((rs.attempts, Some(rs.next_retry_at)));
+        }
+        rs.in_progress = true;
+        Ok(())
     }
 
     pub fn remove_reconnect_state(&mut self, addr: &PeerAddr) -> bool {

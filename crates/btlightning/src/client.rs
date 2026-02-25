@@ -618,25 +618,6 @@ impl LightningClient {
         addr_key: &PeerAddr,
         axon_info: &QuicAxonInfo,
     ) -> Result<Connection> {
-        {
-            let state = self.state.read().await;
-            if let Some(rs) = state.registry.reconnect_state(addr_key) {
-                if rs.attempts >= self.config.reconnect_max_retries {
-                    return Err(LightningError::Connection(format!(
-                        "Reconnection attempts exhausted for {} ({}/{}), awaiting registry refresh",
-                        addr_key, rs.attempts, self.config.reconnect_max_retries
-                    )));
-                }
-                if Instant::now() < rs.next_retry_at {
-                    return Err(LightningError::Connection(format!(
-                        "Reconnection to {} in backoff, next retry in {:?}",
-                        addr_key,
-                        rs.next_retry_at - Instant::now()
-                    )));
-                }
-            }
-        }
-
         let endpoint = self
             .endpoint
             .as_ref()
@@ -647,6 +628,32 @@ impl LightningClient {
             .as_ref()
             .ok_or_else(|| LightningError::Signing("No signer configured".into()))?
             .clone();
+
+        {
+            let mut state = self.state.write().await;
+            if let Err((attempts, next_retry)) = state
+                .registry
+                .try_start_reconnect(addr_key.clone(), self.config.reconnect_max_retries)
+            {
+                return match next_retry {
+                    Some(at) => Err(LightningError::Connection(format!(
+                        "Reconnection to {} in backoff, next retry in {:?}",
+                        addr_key,
+                        at - Instant::now()
+                    ))),
+                    None if attempts >= self.config.reconnect_max_retries => {
+                        Err(LightningError::Connection(format!(
+                            "Reconnection attempts exhausted for {} ({}/{}), awaiting registry refresh",
+                            addr_key, attempts, self.config.reconnect_max_retries
+                        )))
+                    }
+                    None => Err(LightningError::Connection(format!(
+                        "Reconnection to {} already in progress",
+                        addr_key
+                    ))),
+                };
+            }
+        }
 
         warn!("Connection to {} dead, attempting reconnection", addr_key);
 
@@ -733,6 +740,7 @@ impl LightningClient {
             Err(e) => {
                 let mut state = self.state.write().await;
                 let rs = state.registry.reconnect_state_or_insert(addr_key.clone());
+                rs.in_progress = false;
                 let shift = rs.attempts.min(20);
                 rs.attempts += 1;
                 let backoff = self
