@@ -729,8 +729,12 @@ impl LightningClient {
                 let rs = state.registry.reconnect_state_or_insert(addr_key.clone());
                 let shift = rs.attempts.min(20);
                 rs.attempts += 1;
-                let backoff = (self.config.reconnect_initial_backoff * 2u32.pow(shift))
-                    .min(self.config.reconnect_max_backoff);
+                let backoff = self
+                    .config
+                    .reconnect_initial_backoff
+                    .checked_mul(2u32.pow(shift))
+                    .map(|d| d.min(self.config.reconnect_max_backoff))
+                    .unwrap_or(self.config.reconnect_max_backoff);
                 rs.next_retry_at = Instant::now() + backoff;
                 error!(
                     "Reconnection to {} failed (attempt {}/{}), next retry in {:?}: {}",
