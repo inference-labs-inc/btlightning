@@ -103,7 +103,7 @@ impl RustLightning {
         set_opt!(config, max_connections, max_connections);
         set_opt!(config, max_frame_payload_bytes, max_frame_payload_bytes);
         set_opt!(config, max_stream_payload_bytes, max_stream_payload_bytes);
-        if let Some(v) = stream_chunk_timeout_secs {
+        if let Some(v) = stream_chunk_timeout_secs.filter(|&v| v > 0) {
             config.stream_chunk_timeout = Some(Duration::from_secs(v));
         }
 

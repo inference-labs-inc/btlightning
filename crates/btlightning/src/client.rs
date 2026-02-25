@@ -143,6 +143,11 @@ impl LightningClientConfig {
                 u32::MAX
             )));
         }
+        if self.stream_chunk_timeout.is_some_and(|d| d.is_zero()) {
+            return Err(LightningError::Config(
+                "stream_chunk_timeout must be non-zero".into(),
+            ));
+        }
         if self.max_stream_payload_bytes < self.max_frame_payload_bytes {
             return Err(LightningError::Config(format!(
                 "max_stream_payload_bytes ({}) must be >= max_frame_payload_bytes ({})",
@@ -1641,6 +1646,13 @@ mod tests {
     fn with_config_rejects_stream_below_frame() {
         let mut cfg = LightningClientConfig::default();
         cfg.max_stream_payload_bytes = cfg.max_frame_payload_bytes - 1;
+        assert!(LightningClient::with_config("hk".into(), cfg).is_err());
+    }
+
+    #[test]
+    fn with_config_rejects_zero_stream_chunk_timeout() {
+        let mut cfg = LightningClientConfig::default();
+        cfg.stream_chunk_timeout = Some(Duration::ZERO);
         assert!(LightningClient::with_config("hk".into(), cfg).is_err());
     }
 
