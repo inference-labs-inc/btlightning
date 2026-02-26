@@ -131,11 +131,6 @@ impl MinerRegistry {
         self.established_connections.keys()
     }
 
-    #[cfg(test)]
-    pub fn reconnect_state(&self, addr: &PeerAddr) -> Option<&ReconnectState> {
-        self.reconnect_states.get(addr)
-    }
-
     pub fn reconnect_state_or_insert(&mut self, addr: PeerAddr) -> &mut ReconnectState {
         self.reconnect_states
             .entry(addr)
@@ -319,10 +314,10 @@ mod tests {
         reg.register(QuicAxonInfo::new("hk1".into(), "1.2.3.4".into(), 8080, 4));
         let rs = reg.reconnect_state_or_insert(old_addr.clone());
         rs.attempts = 3;
-        assert!(reg.reconnect_state(&old_addr).is_some());
+        assert!(reg.reconnect_states.get(&old_addr).is_some());
 
         reg.register(QuicAxonInfo::new("hk1".into(), "5.6.7.8".into(), 9090, 4));
-        assert!(reg.reconnect_state(&old_addr).is_none());
+        assert!(reg.reconnect_states.get(&old_addr).is_none());
         reg.assert_invariants();
     }
 
