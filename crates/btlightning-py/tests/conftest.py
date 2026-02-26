@@ -30,6 +30,7 @@ def echo_server(free_port):
     time.sleep(0.05)
     yield server, free_port
     server.stop()
+    t.join(timeout=5)
 
 
 @pytest.fixture()

@@ -40,11 +40,13 @@ def test_start_stop_lifecycle():
     t.start()
     time.sleep(0.05)
 
-    stats = server.get_connection_stats()
-    assert "total_connections" in stats
-    assert "verified_connections" in stats
-
-    server.stop()
+    try:
+        stats = server.get_connection_stats()
+        assert "total_connections" in stats
+        assert "verified_connections" in stats
+    finally:
+        server.stop()
+        t.join(timeout=5)
 
 
 def test_get_connection_stats():
@@ -56,8 +58,10 @@ def test_get_connection_stats():
     t.start()
     time.sleep(0.05)
 
-    stats = server.get_connection_stats()
-    assert stats["total_connections"] == "0"
-    assert stats["verified_connections"] == "0"
-
-    server.stop()
+    try:
+        stats = server.get_connection_stats()
+        assert stats["total_connections"] == "0"
+        assert stats["verified_connections"] == "0"
+    finally:
+        server.stop()
+        t.join(timeout=5)

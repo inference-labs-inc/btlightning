@@ -30,9 +30,11 @@ def test_streaming_handler():
     axon = {"hotkey": MINER_HOTKEY, "ip": "127.0.0.1", "port": port}
     client.initialize_connections([axon])
 
-    stream = client.query_axon_stream(axon, {"synapse_type": "stream", "data": {}})
-    received = list(stream)
-    assert received == chunks
-
-    client.close()
-    server.stop()
+    try:
+        stream = client.query_axon_stream(axon, {"synapse_type": "stream", "data": {}})
+        received = list(stream)
+        assert received == chunks
+    finally:
+        client.close()
+        server.stop()
+        t.join(timeout=5)

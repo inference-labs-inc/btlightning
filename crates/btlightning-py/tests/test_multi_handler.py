@@ -29,13 +29,15 @@ def test_two_handlers_on_same_server():
     axon = {"hotkey": MINER_HOTKEY, "ip": "127.0.0.1", "port": port}
     client.initialize_connections([axon])
 
-    echo_resp = client.query_axon(axon, {"synapse_type": "echo", "data": {"msg": "hi"}})
-    assert echo_resp["success"] is True
-    assert echo_resp["data"]["msg"] == "hi"
+    try:
+        echo_resp = client.query_axon(axon, {"synapse_type": "echo", "data": {"msg": "hi"}})
+        assert echo_resp["success"] is True
+        assert echo_resp["data"]["msg"] == "hi"
 
-    upper_resp = client.query_axon(axon, {"synapse_type": "upper", "data": {"text": "hello"}})
-    assert upper_resp["success"] is True
-    assert upper_resp["data"]["result"] == "HELLO"
-
-    client.close()
-    server.stop()
+        upper_resp = client.query_axon(axon, {"synapse_type": "upper", "data": {"text": "hello"}})
+        assert upper_resp["success"] is True
+        assert upper_resp["data"]["result"] == "HELLO"
+    finally:
+        client.close()
+        server.stop()
+        t.join(timeout=5)
