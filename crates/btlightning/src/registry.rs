@@ -1,6 +1,7 @@
 use crate::types::{PeerAddr, QuicAxonInfo};
 use quinn::Connection;
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 use tokio::time::Instant;
 
 pub(crate) struct ReconnectState {
@@ -141,6 +142,7 @@ impl MinerRegistry {
         &mut self,
         addr: PeerAddr,
         max_retries: u32,
+        slow_probe_interval: Option<Duration>,
     ) -> std::result::Result<(), ReconnectRejection> {
         let rs = self
             .reconnect_states
@@ -150,9 +152,22 @@ impl MinerRegistry {
             return Err(ReconnectRejection::InProgress);
         }
         if rs.attempts >= max_retries {
-            return Err(ReconnectRejection::Exhausted {
-                attempts: rs.attempts,
-            });
+            match slow_probe_interval {
+                Some(_) if Instant::now() >= rs.next_retry_at => {
+                    rs.in_progress = true;
+                    return Ok(());
+                }
+                Some(_) => {
+                    return Err(ReconnectRejection::Backoff {
+                        next: rs.next_retry_at,
+                    });
+                }
+                None => {
+                    return Err(ReconnectRejection::Exhausted {
+                        attempts: rs.attempts,
+                    });
+                }
+            }
         }
         if Instant::now() < rs.next_retry_at {
             return Err(ReconnectRejection::Backoff {
