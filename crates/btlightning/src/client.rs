@@ -44,6 +44,10 @@ pub struct LightningClientConfig {
     pub reconnect_max_backoff: Duration,
     /// Maximum consecutive reconnection attempts before giving up. Default: 5.
     pub reconnect_max_retries: u32,
+    /// After fast retries are exhausted, interval between periodic slow probe attempts.
+    /// Keeps scoring data flowing without wasting resources. `None` disables slow
+    /// probing (hard exhaustion, original behavior). Default: 60s.
+    pub reconnect_slow_probe_interval: Option<Duration>,
     /// Maximum number of concurrent QUIC connections. Default: 1024.
     pub max_connections: usize,
     /// Maximum single-frame payload size in bytes. Default: 64 MiB.
@@ -70,6 +74,7 @@ impl Default for LightningClientConfig {
             reconnect_initial_backoff: Duration::from_secs(1),
             reconnect_max_backoff: Duration::from_secs(60),
             reconnect_max_retries: 5,
+            reconnect_slow_probe_interval: Some(Duration::from_secs(60)),
             max_connections: 1024,
             max_frame_payload_bytes: DEFAULT_MAX_FRAME_PAYLOAD,
             max_stream_payload_bytes: DEFAULT_MAX_FRAME_PAYLOAD,
@@ -128,6 +133,14 @@ impl LightningClientConfig {
         if self.reconnect_max_retries == 0 {
             return Err(LightningError::Config(
                 "reconnect_max_retries must be at least 1".into(),
+            ));
+        }
+        if self
+            .reconnect_slow_probe_interval
+            .is_some_and(|d| d.is_zero())
+        {
+            return Err(LightningError::Config(
+                "reconnect_slow_probe_interval must be non-zero when set".into(),
             ));
         }
         if self.max_connections == 0 {
@@ -190,6 +203,10 @@ impl LightningClientConfigBuilder {
     }
     pub fn reconnect_max_retries(mut self, val: u32) -> Self {
         self.config.reconnect_max_retries = val;
+        self
+    }
+    pub fn reconnect_slow_probe_interval(mut self, val: Option<Duration>) -> Self {
+        self.config.reconnect_slow_probe_interval = val;
         self
     }
     pub fn max_connections(mut self, val: usize) -> Self {
@@ -640,10 +657,11 @@ impl LightningClient {
 
         {
             let mut state = self.state.write().await;
-            if let Err(rejection) = state
-                .registry
-                .try_start_reconnect(addr_key.clone(), self.config.reconnect_max_retries)
-            {
+            if let Err(rejection) = state.registry.try_start_reconnect(
+                addr_key.clone(),
+                self.config.reconnect_max_retries,
+                self.config.reconnect_slow_probe_interval,
+            ) {
                 use crate::registry::ReconnectRejection;
                 return match rejection {
                     ReconnectRejection::Backoff { next } => {
@@ -757,17 +775,28 @@ impl LightningClient {
                 rs.in_progress = false;
                 let shift = rs.attempts.min(20);
                 rs.attempts += 1;
-                let backoff = self
-                    .config
-                    .reconnect_initial_backoff
-                    .checked_mul(2u32.pow(shift))
-                    .map(|d| d.min(self.config.reconnect_max_backoff))
-                    .unwrap_or(self.config.reconnect_max_backoff);
-                rs.next_retry_at = Instant::now() + backoff;
-                error!(
-                    "Reconnection to {} failed (attempt {}/{}), next retry in {:?}: {}",
-                    addr_key, rs.attempts, self.config.reconnect_max_retries, backoff, e
-                );
+                let in_slow_probe = rs.attempts >= self.config.reconnect_max_retries;
+                if in_slow_probe {
+                    if let Some(probe_interval) = self.config.reconnect_slow_probe_interval {
+                        rs.next_retry_at = Instant::now() + probe_interval;
+                        warn!(
+                            "Slow probe to {} failed, next probe in {:?}: {}",
+                            addr_key, probe_interval, e
+                        );
+                    }
+                } else {
+                    let backoff = self
+                        .config
+                        .reconnect_initial_backoff
+                        .checked_mul(2u32.pow(shift))
+                        .map(|d| d.min(self.config.reconnect_max_backoff))
+                        .unwrap_or(self.config.reconnect_max_backoff);
+                    rs.next_retry_at = Instant::now() + backoff;
+                    error!(
+                        "Reconnection to {} failed (attempt {}/{}), next retry in {:?}: {}",
+                        addr_key, rs.attempts, self.config.reconnect_max_retries, backoff, e
+                    );
+                }
                 Err(e)
             }
         }
