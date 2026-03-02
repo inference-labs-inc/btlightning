@@ -773,6 +773,8 @@ impl LightningClient {
                 let mut state = self.state.write().await;
                 let rs = state.registry.reconnect_state_or_insert(addr_key.clone());
                 rs.in_progress = false;
+                let shift = rs.attempts.min(20);
+                rs.attempts += 1;
                 let in_slow_probe = rs.attempts >= self.config.reconnect_max_retries;
                 if in_slow_probe {
                     if let Some(probe_interval) = self.config.reconnect_slow_probe_interval {
@@ -783,8 +785,6 @@ impl LightningClient {
                         );
                     }
                 } else {
-                    let shift = rs.attempts.min(20);
-                    rs.attempts += 1;
                     let backoff = self
                         .config
                         .reconnect_initial_backoff
