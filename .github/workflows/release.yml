@@ -5,7 +5,7 @@ on:
     types: [published]
 
 permissions:
-  contents: write
+  contents: read
   id-token: write
   attestations: write
 
@@ -145,6 +145,8 @@ jobs:
     name: Upload release assets
     needs: [build-wheels, build-sdist]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Download wheel artifacts
         uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8
