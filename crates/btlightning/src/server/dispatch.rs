@@ -8,7 +8,7 @@ use crate::util::unix_timestamp_secs;
 use quinn::{Connection, RecvStream, SendStream};
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 pub(super) async fn handle_connection(connection: Connection, ctx: ServerContext) {
     let connection = Arc::new(connection);
@@ -24,7 +24,13 @@ pub(super) async fn handle_connection(connection: Connection, ctx: ServerContext
                 });
             }
             Err(e) => {
-                debug!("Connection ended: {}", e);
+                let close_reason = connection.close_reason();
+                info!(
+                    remote = %connection.remote_address(),
+                    error = %e,
+                    close_reason = ?close_reason,
+                    "QUIC connection stream loop ended"
+                );
                 break;
             }
         }

@@ -558,7 +558,17 @@ impl LightningClient {
             Some(conn) if conn.close_reason().is_none() => {
                 send_synapse_packet(&conn, request, max_fp).await
             }
-            _ => {
+            Some(conn) => {
+                let reason = conn.close_reason();
+                warn!(
+                    addr = %addr_key,
+                    close_reason = ?reason,
+                    "QUIC connection closed, triggering reconnect"
+                );
+                self.try_reconnect_and_query(&addr_key, &axon_info, request)
+                    .await
+            }
+            None => {
                 self.try_reconnect_and_query(&addr_key, &axon_info, request)
                     .await
             }
@@ -605,7 +615,17 @@ impl LightningClient {
                 )
                 .await
             }
-            _ => {
+            Some(conn) => {
+                let reason = conn.close_reason();
+                warn!(
+                    addr = %addr_key,
+                    close_reason = ?reason,
+                    "QUIC connection closed, triggering reconnect (stream)"
+                );
+                self.try_reconnect_and_stream(&addr_key, &axon_info, request)
+                    .await
+            }
+            None => {
                 self.try_reconnect_and_stream(&addr_key, &axon_info, request)
                     .await
             }
