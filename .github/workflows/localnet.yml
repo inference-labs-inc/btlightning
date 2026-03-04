@@ -4,7 +4,7 @@ on:
   schedule:
     - cron: "0 4 * * *"
   pull_request:
-    types: [labeled]
+    types: [labeled, synchronize]
   workflow_dispatch:
 
 permissions:
@@ -15,7 +15,7 @@ jobs:
     name: Localnet integration tests
     if: >-
       github.event_name != 'pull_request' ||
-      github.event.label.name == 'localnet'
+      contains(github.event.pull_request.labels.*.name, 'localnet')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
