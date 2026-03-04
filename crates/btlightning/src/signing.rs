@@ -86,6 +86,47 @@ impl<F: Fn(&[u8]) -> Result<Vec<u8>> + Send + Sync> Signer for CallbackSigner<F>
     }
 }
 
+/// [`Signer`] backed by a `btwallet` keypair loaded from the Bittensor wallet directory.
+///
+/// Requires the `btwallet` feature.
+#[cfg(feature = "btwallet")]
+pub struct BtWalletSigner {
+    keypair: bittensor_wallet::Keypair,
+}
+
+#[cfg(feature = "btwallet")]
+impl BtWalletSigner {
+    /// Wraps an existing `btwallet::Keypair`.
+    pub fn new(keypair: bittensor_wallet::Keypair) -> Self {
+        Self { keypair }
+    }
+
+    /// Loads the hotkey keypair from `~/<path>/<name>/hotkeys/<hotkey_name>`.
+    pub fn from_wallet(name: &str, path: &str, hotkey_name: &str) -> Result<Self> {
+        let wallet = bittensor_wallet::Wallet::new(
+            Some(name.to_string()),
+            Some(path.to_string()),
+            Some(hotkey_name.to_string()),
+            None,
+        );
+        let keypair = wallet
+            .get_hotkey(Some(hotkey_name.to_string()))
+            .map_err(|e| {
+                LightningError::Config(format!("failed to load hotkey from wallet: {}", e))
+            })?;
+        Ok(Self { keypair })
+    }
+}
+
+#[cfg(feature = "btwallet")]
+impl Signer for BtWalletSigner {
+    fn sign(&self, message: &[u8]) -> Result<Vec<u8>> {
+        self.keypair
+            .sign(message.to_vec())
+            .map_err(LightningError::Signing)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,46 +196,5 @@ mod tests {
             err
         );
         assert!(err.to_string().contains("network down"));
-    }
-}
-
-/// [`Signer`] backed by a `btwallet` keypair loaded from the Bittensor wallet directory.
-///
-/// Requires the `btwallet` feature.
-#[cfg(feature = "btwallet")]
-pub struct BtWalletSigner {
-    keypair: bittensor_wallet::Keypair,
-}
-
-#[cfg(feature = "btwallet")]
-impl BtWalletSigner {
-    /// Wraps an existing `btwallet::Keypair`.
-    pub fn new(keypair: bittensor_wallet::Keypair) -> Self {
-        Self { keypair }
-    }
-
-    /// Loads the hotkey keypair from `~/<path>/<name>/hotkeys/<hotkey_name>`.
-    pub fn from_wallet(name: &str, path: &str, hotkey_name: &str) -> Result<Self> {
-        let wallet = bittensor_wallet::Wallet::new(
-            Some(name.to_string()),
-            Some(path.to_string()),
-            Some(hotkey_name.to_string()),
-            None,
-        );
-        let keypair = wallet
-            .get_hotkey(Some(hotkey_name.to_string()))
-            .map_err(|e| {
-                LightningError::Config(format!("failed to load hotkey from wallet: {}", e))
-            })?;
-        Ok(Self { keypair })
-    }
-}
-
-#[cfg(feature = "btwallet")]
-impl Signer for BtWalletSigner {
-    fn sign(&self, message: &[u8]) -> Result<Vec<u8>> {
-        self.keypair
-            .sign(message.to_vec())
-            .map_err(LightningError::Signing)
     }
 }

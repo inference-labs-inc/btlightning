@@ -872,9 +872,8 @@ impl LightningClient {
         for addr_key in state.registry.connection_addrs() {
             let status = match state.registry.get_connection(addr_key) {
                 Some(conn) => {
-                    let close_reason = conn.close_reason();
-                    if close_reason.is_some() {
-                        format!("closed({:?})", close_reason.unwrap())
+                    if let Some(reason) = conn.close_reason() {
+                        format!("closed({:?})", reason)
                     } else {
                         "active".to_string()
                     }
@@ -1755,8 +1754,10 @@ mod tests {
 
     #[test]
     fn with_config_rejects_frame_payload_below_minimum() {
-        let mut cfg = LightningClientConfig::default();
-        cfg.max_frame_payload_bytes = 512;
+        let cfg = LightningClientConfig {
+            max_frame_payload_bytes: 512,
+            ..LightningClientConfig::default()
+        };
         assert!(LightningClient::with_config("hk".into(), cfg).is_err());
     }
 
@@ -1767,23 +1768,30 @@ mod tests {
             Ok(v) => v,
             Err(_) => return,
         };
-        let mut cfg = LightningClientConfig::default();
-        cfg.max_frame_payload_bytes = val;
-        cfg.max_stream_payload_bytes = val;
+        let cfg = LightningClientConfig {
+            max_frame_payload_bytes: val,
+            max_stream_payload_bytes: val,
+            ..LightningClientConfig::default()
+        };
         assert!(LightningClient::with_config("hk".into(), cfg).is_err());
     }
 
     #[test]
     fn with_config_rejects_stream_below_frame() {
-        let mut cfg = LightningClientConfig::default();
-        cfg.max_stream_payload_bytes = cfg.max_frame_payload_bytes - 1;
+        let base = LightningClientConfig::default();
+        let cfg = LightningClientConfig {
+            max_stream_payload_bytes: base.max_frame_payload_bytes - 1,
+            ..base
+        };
         assert!(LightningClient::with_config("hk".into(), cfg).is_err());
     }
 
     #[test]
     fn with_config_rejects_zero_stream_chunk_timeout() {
-        let mut cfg = LightningClientConfig::default();
-        cfg.stream_chunk_timeout = Some(Duration::ZERO);
+        let cfg = LightningClientConfig {
+            stream_chunk_timeout: Some(Duration::ZERO),
+            ..LightningClientConfig::default()
+        };
         assert!(LightningClient::with_config("hk".into(), cfg).is_err());
     }
 

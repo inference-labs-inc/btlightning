@@ -2010,13 +2010,22 @@ async fn query_works_via_update_miner_registry_after_delay() {
         .await
         .unwrap();
 
-    tokio::time::sleep(Duration::from_secs(5)).await;
-
-    let resp = client
-        .query_axon_with_timeout(axon.clone(), build_request("echo"), Duration::from_secs(5))
-        .await
-        .unwrap();
-    assert!(resp.success);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match client
+            .query_axon_with_timeout(axon.clone(), build_request("echo"), Duration::from_secs(2))
+            .await
+        {
+            Ok(resp) => {
+                assert!(resp.success);
+                break;
+            }
+            Err(_) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            Err(e) => panic!("query did not succeed within deadline: {e}"),
+        }
+    }
 
     client.close_all_connections().await.unwrap();
     env.shutdown().await;
