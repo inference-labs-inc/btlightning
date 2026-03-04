@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time::Instant;
-use tracing::{error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 #[cfg(feature = "subtensor")]
 use crate::metagraph::{Metagraph, MetagraphMonitorConfig};
@@ -556,9 +556,26 @@ impl LightningClient {
         let max_fp = self.config.max_frame_payload_bytes;
         match connection {
             Some(conn) if conn.close_reason().is_none() => {
+                debug!(
+                    addr = %addr_key,
+                    stable_id = conn.stable_id(),
+                    "query_axon: connection alive, sending synapse"
+                );
                 send_synapse_packet(&conn, request, max_fp).await
             }
-            _ => {
+            Some(conn) => {
+                let reason = conn.close_reason();
+                warn!(
+                    addr = %addr_key,
+                    stable_id = conn.stable_id(),
+                    close_reason = ?reason,
+                    "QUIC connection closed, triggering reconnect"
+                );
+                self.try_reconnect_and_query(&addr_key, &axon_info, request)
+                    .await
+            }
+            None => {
+                debug!(addr = %addr_key, "query_axon: no connection in registry");
                 self.try_reconnect_and_query(&addr_key, &axon_info, request)
                     .await
             }
@@ -605,7 +622,17 @@ impl LightningClient {
                 )
                 .await
             }
-            _ => {
+            Some(conn) => {
+                let reason = conn.close_reason();
+                warn!(
+                    addr = %addr_key,
+                    close_reason = ?reason,
+                    "QUIC connection closed, triggering reconnect (stream)"
+                );
+                self.try_reconnect_and_stream(&addr_key, &axon_info, request)
+                    .await
+            }
+            None => {
                 self.try_reconnect_and_stream(&addr_key, &axon_info, request)
                     .await
             }
@@ -843,7 +870,17 @@ impl LightningClient {
         );
 
         for addr_key in state.registry.connection_addrs() {
-            stats.insert(format!("connection_{}", addr_key), "active".to_string());
+            let status = match state.registry.get_connection(addr_key) {
+                Some(conn) => {
+                    if let Some(reason) = conn.close_reason() {
+                        format!("closed({:?})", reason)
+                    } else {
+                        "active".to_string()
+                    }
+                }
+                None => "missing".to_string(),
+            };
+            stats.insert(format!("connection_{}", addr_key), status);
         }
 
         Ok(stats)
@@ -1075,6 +1112,30 @@ async fn update_miner_registry_inner(
                     "Registry refresh reset reconnection backoff for {}",
                     addr_key
                 );
+            }
+        }
+
+        let dead_addrs: Vec<PeerAddr> = active_addrs
+            .iter()
+            .filter(|addr| {
+                st.registry
+                    .get_connection(addr)
+                    .is_some_and(|c| c.close_reason().is_some())
+            })
+            .cloned()
+            .collect();
+        for addr_key in &dead_addrs {
+            if let Some(conn) = st.registry.remove_connection(addr_key) {
+                let hotkeys = st.registry.hotkeys_at_addr(addr_key);
+                info!(
+                    addr = %addr_key,
+                    close_reason = ?conn.close_reason(),
+                    hotkeys = ?hotkeys,
+                    "Pruning dead connection and deregistering miners"
+                );
+                for hk in &hotkeys {
+                    st.registry.deregister(hk);
+                }
             }
         }
 
@@ -1500,16 +1561,24 @@ async fn send_synapse_packet(
     request: QuicRequest,
     max_frame_payload: usize,
 ) -> Result<QuicResponse> {
+    let stable_id = connection.stable_id();
+    debug!(stable_id, "send_synapse_packet: opening bi stream");
     let (mut send, mut recv) = connection
         .open_bi()
         .await
         .map_err(|e| LightningError::Connection(format!("Failed to open stream: {}", e)))?;
+    debug!(stable_id, "send_synapse_packet: bi stream opened");
 
     let start = Instant::now();
 
     send_synapse_frame(&mut send, request).await?;
+    debug!(
+        stable_id,
+        "send_synapse_packet: frame sent, awaiting response"
+    );
 
     let (msg_type, payload) = read_frame(&mut recv, max_frame_payload).await?;
+    debug!(stable_id, msg_type = ?msg_type, elapsed_ms = start.elapsed().as_millis() as u64, "send_synapse_packet: response received");
 
     match msg_type {
         MessageType::SynapseResponse => {
@@ -1685,8 +1754,10 @@ mod tests {
 
     #[test]
     fn with_config_rejects_frame_payload_below_minimum() {
-        let mut cfg = LightningClientConfig::default();
-        cfg.max_frame_payload_bytes = 512;
+        let cfg = LightningClientConfig {
+            max_frame_payload_bytes: 512,
+            ..LightningClientConfig::default()
+        };
         assert!(LightningClient::with_config("hk".into(), cfg).is_err());
     }
 
@@ -1697,23 +1768,30 @@ mod tests {
             Ok(v) => v,
             Err(_) => return,
         };
-        let mut cfg = LightningClientConfig::default();
-        cfg.max_frame_payload_bytes = val;
-        cfg.max_stream_payload_bytes = val;
+        let cfg = LightningClientConfig {
+            max_frame_payload_bytes: val,
+            max_stream_payload_bytes: val,
+            ..LightningClientConfig::default()
+        };
         assert!(LightningClient::with_config("hk".into(), cfg).is_err());
     }
 
     #[test]
     fn with_config_rejects_stream_below_frame() {
-        let mut cfg = LightningClientConfig::default();
-        cfg.max_stream_payload_bytes = cfg.max_frame_payload_bytes - 1;
+        let base = LightningClientConfig::default();
+        let cfg = LightningClientConfig {
+            max_stream_payload_bytes: base.max_frame_payload_bytes - 1,
+            ..base
+        };
         assert!(LightningClient::with_config("hk".into(), cfg).is_err());
     }
 
     #[test]
     fn with_config_rejects_zero_stream_chunk_timeout() {
-        let mut cfg = LightningClientConfig::default();
-        cfg.stream_chunk_timeout = Some(Duration::ZERO);
+        let cfg = LightningClientConfig {
+            stream_chunk_timeout: Some(Duration::ZERO),
+            ..LightningClientConfig::default()
+        };
         assert!(LightningClient::with_config("hk".into(), cfg).is_err());
     }
 

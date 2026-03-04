@@ -8,14 +8,18 @@ use crate::util::unix_timestamp_secs;
 use quinn::{Connection, RecvStream, SendStream};
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 pub(super) async fn handle_connection(connection: Connection, ctx: ServerContext) {
     let connection = Arc::new(connection);
+    let stable_id = connection.stable_id();
+    let remote = connection.remote_address();
+    debug!(stable_id, %remote, "handle_connection: entering accept_bi loop");
 
     loop {
         match connection.accept_bi().await {
             Ok((send, recv)) => {
+                debug!(stable_id, "handle_connection: accepted bi stream");
                 let conn = connection.clone();
                 let ctx = ctx.clone();
 
@@ -24,7 +28,13 @@ pub(super) async fn handle_connection(connection: Connection, ctx: ServerContext
                 });
             }
             Err(e) => {
-                debug!("Connection ended: {}", e);
+                let close_reason = connection.close_reason();
+                info!(
+                    remote = %connection.remote_address(),
+                    error = %e,
+                    close_reason = ?close_reason,
+                    "QUIC connection stream loop ended"
+                );
                 break;
             }
         }
@@ -74,6 +84,7 @@ async fn handle_stream(
         }
     };
 
+    debug!(msg_type = ?frame.0, payload_len = frame.1.len(), "handle_stream: frame received");
     match frame {
         (MessageType::SynapsePacket, payload) => {
             let packet: SynapsePacket = match rmp_serde::from_slice(&payload) {

@@ -111,6 +111,12 @@ pub(super) async fn process_handshake(
         connections_guard.insert(request.validator_hotkey.clone(), validator_conn)
     {
         if !Arc::ptr_eq(&prev_conn.connection, &connection) {
+            warn!(
+                validator = %request.validator_hotkey,
+                prev_addr = %prev_conn.connection.remote_address(),
+                new_addr = %remote_addr,
+                "closing previous connection for validator (replaced by new handshake)"
+            );
             prev_conn.connection.close(0u32.into(), b"replaced");
             let prev_addr = prev_conn.connection.remote_address();
             if prev_addr != remote_addr {

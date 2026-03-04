@@ -329,10 +329,10 @@ mod tests {
         reg.register(QuicAxonInfo::new("hk1".into(), "1.2.3.4".into(), 8080, 4));
         let rs = reg.reconnect_state_or_insert(old_addr.clone());
         rs.attempts = 3;
-        assert!(reg.reconnect_states.get(&old_addr).is_some());
+        assert!(reg.reconnect_states.contains_key(&old_addr));
 
         reg.register(QuicAxonInfo::new("hk1".into(), "5.6.7.8".into(), 9090, 4));
-        assert!(reg.reconnect_states.get(&old_addr).is_none());
+        assert!(!reg.reconnect_states.contains_key(&old_addr));
         reg.assert_invariants();
     }
 
