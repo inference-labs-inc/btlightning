@@ -1,0 +1,51 @@
+name: Localnet Integration
+
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  localnet:
+    name: Localnet integration tests
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.label.name == 'localnet'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+
+      - name: Start subtensor localnet
+        run: |
+          docker run -d --name subtensor \
+            -p 9944:9944 -p 9945:9945 \
+            ghcr.io/opentensor/subtensor-localnet:latest
+
+      - name: Wait for subtensor readiness
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:9944/health; then
+              echo "Subtensor ready"
+              exit 0
+            fi
+            echo "Waiting for subtensor... ($i/60)"
+            sleep 2
+          done
+          echo "Subtensor failed to start within 120s"
+          docker logs subtensor
+          exit 1
+
+      - name: Run localnet integration tests
+        run: cargo test -p btlightning --features localnet-tests --test localnet -- --ignored --nocapture
