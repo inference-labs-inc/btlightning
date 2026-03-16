@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   release:
-    uses: inference-labs-inc/release/.github/workflows/publish-release.yml@main
+    uses: inference-labs-inc/release/.github/workflows/publish-release.yml@c8fedc682daa107a820a5bc1fbd03b95ff428421
     with:
       version: ${{ github.event.release.tag_name }}
       rust-toolchain: "1.88.0"
