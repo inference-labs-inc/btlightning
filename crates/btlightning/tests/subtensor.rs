@@ -9,6 +9,7 @@ use std::time::Duration;
 use subxt::{dynamic::Value, OnlineClient, SubstrateConfig};
 
 const TESTNET_ENDPOINT: &str = "wss://test.finney.opentensor.ai:443";
+const PERMIT_POPULATION_TIMEOUT: Duration = Duration::from_secs(300);
 
 struct SubtensorPermitResolver {
     rpc_url: String,
@@ -25,25 +26,22 @@ impl SubtensorPermitResolver {
             .await
             .map_err(|e| LightningError::Handler(format!("subtensor connection: {}", e)))?;
 
-        let storage = api
-            .storage()
-            .at_latest()
+        let at = api
+            .at_current_block()
             .await
             .map_err(|e| LightningError::Handler(e.to_string()))?;
+        let storage = at.storage();
 
-        let permits_query = subxt::dynamic::storage(
-            "SubtensorModule",
-            "ValidatorPermit",
-            vec![Value::u128(self.netuid as u128)],
-        );
+        let permits_query: subxt::storage::DynamicAddress =
+            subxt::dynamic::storage("SubtensorModule", "ValidatorPermit");
 
         let permits: Vec<bool> = match storage
-            .fetch(&permits_query)
+            .try_fetch(permits_query, vec![Value::u128(self.netuid as u128)])
             .await
             .map_err(|e| LightningError::Handler(e.to_string()))?
         {
             Some(val) => val
-                .as_type()
+                .decode_as()
                 .map_err(|e| LightningError::Handler(format!("decode ValidatorPermit: {}", e)))?,
             None => return Ok(HashSet::new()),
         };
@@ -54,19 +52,19 @@ impl SubtensorPermitResolver {
                 continue;
             }
 
-            let keys_query = subxt::dynamic::storage(
-                "SubtensorModule",
-                "Keys",
-                vec![Value::u128(self.netuid as u128), Value::u128(uid as u128)],
-            );
+            let keys_query: subxt::storage::DynamicAddress =
+                subxt::dynamic::storage("SubtensorModule", "Keys");
 
             if let Some(val) = storage
-                .fetch(&keys_query)
+                .try_fetch(
+                    keys_query,
+                    vec![Value::u128(self.netuid as u128), Value::u128(uid as u128)],
+                )
                 .await
                 .map_err(|e| LightningError::Handler(e.to_string()))?
             {
                 let account: subxt::utils::AccountId32 = val
-                    .as_type()
+                    .decode_as()
                     .map_err(|e| LightningError::Handler(format!("decode Keys: {}", e)))?;
                 validators.insert(account.to_string());
             }
@@ -126,7 +124,7 @@ async fn subtensor_resolver_integrates_with_server() {
     let handle = tokio::spawn(async move { s.serve_forever().await });
 
     let srv = server.clone();
-    tokio::time::timeout(Duration::from_secs(30), async {
+    tokio::time::timeout(PERMIT_POPULATION_TIMEOUT, async {
         loop {
             if srv.get_permitted_validator_count().await > 0 {
                 break;
@@ -135,7 +133,12 @@ async fn subtensor_resolver_integrates_with_server() {
         }
     })
     .await
-    .expect("subtensor resolver should populate permits within 30s");
+    .unwrap_or_else(|_| {
+        panic!(
+            "subtensor resolver should populate permits within {:?}",
+            PERMIT_POPULATION_TIMEOUT
+        )
+    });
 
     assert!(server.get_permitted_validator_count().await > 0);
 

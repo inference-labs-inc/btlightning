@@ -6,11 +6,15 @@ use sp_core::crypto::Ss58Codec;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::time::Duration;
+use subxt::client::{OnlineClientAtBlock, OnlineClientAtBlockImpl};
 use subxt::dynamic::Value;
 use subxt::ext::scale_value::At;
-use subxt::storage::Storage;
+use subxt::storage::StorageClient;
 use subxt::{OnlineClient, PolkadotConfig};
 use tracing::{debug, info, warn};
+
+type AtBlockClient = OnlineClientAtBlock<PolkadotConfig>;
+type SubnetStorage<'a> = StorageClient<'a, PolkadotConfig, OnlineClientAtBlockImpl<PolkadotConfig>>;
 
 const METAGRAPH_SYNC_CONCURRENCY: usize = 32;
 const QUIC_PROTOCOL: u8 = 4;
@@ -128,15 +132,13 @@ impl Metagraph {
     /// Fetches the latest metagraph from a subtensor node, replacing all neuron data.
     /// Tries the runtime API first, falling back to individual storage queries.
     pub async fn sync(&mut self, client: &OnlineClient<PolkadotConfig>) -> Result<()> {
-        let block_ref = client
-            .blocks()
-            .at_latest()
+        let at = client
+            .at_current_block()
             .await
             .map_err(|e| LightningError::Handler(format!("fetching latest block: {}", e)))?;
-        self.block = block_ref.number() as u64;
-        let block_hash = block_ref.hash();
+        self.block = at.block_number();
 
-        let storage = client.storage().at(block_hash);
+        let storage = at.storage();
 
         let n = query_subnet_n(&storage, self.netuid).await?;
         self.n = n;
@@ -148,7 +150,7 @@ impl Metagraph {
             "syncing metagraph"
         );
 
-        let neurons = match self.sync_via_runtime_api(client, block_hash).await {
+        let neurons = match self.sync_via_runtime_api(&at).await {
             Ok(neurons) => {
                 info!(
                     netuid = self.netuid,
@@ -181,18 +183,15 @@ impl Metagraph {
         Ok(())
     }
 
-    async fn sync_via_runtime_api(
-        &self,
-        client: &OnlineClient<PolkadotConfig>,
-        block_hash: <PolkadotConfig as subxt::Config>::Hash,
-    ) -> Result<Vec<NeuronInfo>> {
+    async fn sync_via_runtime_api(&self, at: &AtBlockClient) -> Result<Vec<NeuronInfo>> {
         let params = Encode::encode(&self.netuid);
-        let items: Vec<NeuronInfoLiteRaw> = client
-            .runtime_api()
-            .at(block_hash)
+        let bytes = at
+            .runtime_apis()
             .call_raw("NeuronInfoRuntimeApi_get_neurons_lite", Some(&params))
             .await
             .map_err(|e| LightningError::Handler(format!("calling get_neurons_lite: {}", e)))?;
+        let items: Vec<NeuronInfoLiteRaw> = Decode::decode(&mut &bytes[..])
+            .map_err(|e| LightningError::Handler(format!("decoding get_neurons_lite: {}", e)))?;
 
         let neurons: Vec<NeuronInfo> = items
             .into_iter()
@@ -220,7 +219,7 @@ impl Metagraph {
 
     async fn sync_via_storage(
         &self,
-        storage: &Storage<PolkadotConfig, OnlineClient<PolkadotConfig>>,
+        storage: &SubnetStorage<'_>,
         n: u16,
     ) -> Result<Vec<NeuronInfo>> {
         let netuid = self.netuid;
@@ -392,25 +391,19 @@ impl MetagraphMonitorConfig {
     }
 }
 
-async fn query_subnet_n(
-    storage: &Storage<PolkadotConfig, OnlineClient<PolkadotConfig>>,
-    netuid: u16,
-) -> Result<u16> {
-    let query = subxt::dynamic::storage(
-        "SubtensorModule",
-        "SubnetworkN",
-        vec![Value::from(netuid as u64)],
-    );
+async fn query_subnet_n(storage: &SubnetStorage<'_>, netuid: u16) -> Result<u16> {
+    let query: subxt::storage::DynamicAddress =
+        subxt::dynamic::storage("SubtensorModule", "SubnetworkN");
 
     let result = storage
-        .fetch(&query)
+        .try_fetch(query, vec![Value::from(netuid as u64)])
         .await
         .map_err(|e| LightningError::Handler(e.to_string()))?;
 
     match result {
         Some(val) => {
             let n = val
-                .to_value()
+                .decode()
                 .map_err(|e| LightningError::Handler(e.to_string()))?
                 .as_u128()
                 .ok_or_else(|| LightningError::Handler("SubnetworkN not u128".to_string()))?
@@ -422,7 +415,7 @@ async fn query_subnet_n(
 }
 
 async fn query_neuron_core(
-    storage: &Storage<PolkadotConfig, OnlineClient<PolkadotConfig>>,
+    storage: &SubnetStorage<'_>,
     netuid: u16,
     uid: u16,
 ) -> Result<NeuronInfo> {
@@ -450,48 +443,41 @@ async fn query_neuron_core(
 }
 
 async fn query_hotkey(
-    storage: &Storage<PolkadotConfig, OnlineClient<PolkadotConfig>>,
+    storage: &SubnetStorage<'_>,
     netuid: u16,
     uid: u16,
 ) -> Result<([u8; 32], String)> {
-    let query = subxt::dynamic::storage(
-        "SubtensorModule",
-        "Keys",
-        vec![Value::from(netuid as u64), Value::from(uid as u64)],
-    );
+    let query: subxt::storage::DynamicAddress = subxt::dynamic::storage("SubtensorModule", "Keys");
 
     let result = storage
-        .fetch(&query)
+        .try_fetch(
+            query,
+            vec![Value::from(netuid as u64), Value::from(uid as u64)],
+        )
         .await
         .map_err(|e| LightningError::Handler(e.to_string()))?
         .ok_or_else(|| LightningError::Handler("hotkey not found".to_string()))?;
 
     let account_id: subxt::utils::AccountId32 = result
-        .as_type()
+        .decode_as()
         .map_err(|e| LightningError::Handler(format!("decode Keys: {}", e)))?;
     let bytes = account_id.0;
     let ss58 = sp_core::crypto::AccountId32::new(bytes).to_ss58check();
     Ok((bytes, ss58))
 }
 
-async fn query_stake(
-    storage: &Storage<PolkadotConfig, OnlineClient<PolkadotConfig>>,
-    hotkey_bytes: &[u8; 32],
-) -> Result<u64> {
-    let query = subxt::dynamic::storage(
-        "SubtensorModule",
-        "TotalHotkeyStake",
-        vec![Value::from_bytes(hotkey_bytes)],
-    );
+async fn query_stake(storage: &SubnetStorage<'_>, hotkey_bytes: &[u8; 32]) -> Result<u64> {
+    let query: subxt::storage::DynamicAddress =
+        subxt::dynamic::storage("SubtensorModule", "TotalHotkeyStake");
 
     let result = storage
-        .fetch(&query)
+        .try_fetch(query, vec![Value::from_bytes(hotkey_bytes)])
         .await
         .map_err(|e| LightningError::Handler(e.to_string()))?;
 
     match result {
         Some(val) => Ok(val
-            .to_value()
+            .decode()
             .map_err(|e| LightningError::Handler(e.to_string()))?
             .as_u128()
             .unwrap_or(0) as u64),
@@ -500,49 +486,45 @@ async fn query_stake(
 }
 
 async fn query_vec<T: subxt::ext::scale_decode::IntoVisitor>(
-    storage: &Storage<PolkadotConfig, OnlineClient<PolkadotConfig>>,
+    storage: &SubnetStorage<'_>,
     storage_name: &str,
     netuid: u16,
 ) -> Result<Vec<T>> {
-    let query = subxt::dynamic::storage(
-        "SubtensorModule",
-        storage_name,
-        vec![Value::from(netuid as u64)],
-    );
+    let query: subxt::storage::DynamicAddress =
+        subxt::dynamic::storage("SubtensorModule", storage_name);
 
     let result = storage
-        .fetch(&query)
+        .try_fetch(query, vec![Value::from(netuid as u64)])
         .await
         .map_err(|e| LightningError::Handler(e.to_string()))?;
 
     match result {
         Some(val) => val
-            .as_type::<Vec<T>>()
+            .decode_as::<Vec<T>>()
             .map_err(|e| LightningError::Handler(format!("decoding {} vec: {}", storage_name, e))),
         None => Ok(Vec::new()),
     }
 }
 
 async fn query_axon(
-    storage: &Storage<PolkadotConfig, OnlineClient<PolkadotConfig>>,
+    storage: &SubnetStorage<'_>,
     netuid: u16,
     hotkey_bytes: &[u8; 32],
 ) -> Result<(String, u16, u8)> {
-    let query = subxt::dynamic::storage(
-        "SubtensorModule",
-        "Axons",
-        vec![Value::from(netuid as u64), Value::from_bytes(hotkey_bytes)],
-    );
+    let query: subxt::storage::DynamicAddress = subxt::dynamic::storage("SubtensorModule", "Axons");
 
     let result = storage
-        .fetch(&query)
+        .try_fetch(
+            query,
+            vec![Value::from(netuid as u64), Value::from_bytes(hotkey_bytes)],
+        )
         .await
         .map_err(|e| LightningError::Handler(e.to_string()))?;
 
     match result {
         Some(val) => {
             let v = val
-                .to_value()
+                .decode()
                 .map_err(|e| LightningError::Handler(e.to_string()))?;
             let ip_type = v.at("ip_type").and_then(|v| v.as_u128()).unwrap_or(0) as u8;
             let ip_raw = v.at("ip").and_then(|v| v.as_u128()).unwrap_or(0);
