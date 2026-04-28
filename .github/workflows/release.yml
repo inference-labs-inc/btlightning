@@ -1,20 +1,28 @@
 name: Release
 
 on:
-  release:
-    types: [published]
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
 
 permissions:
   contents: read
   id-token: write
   attestations: write
 
-env:
-  VERSION: ${{ github.event.release.tag_name }}
-
 jobs:
+  resolve-version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    outputs:
+      version: ${{ steps.strip.outputs.version }}
+    steps:
+      - id: strip
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
   publish-crates-io:
     name: Publish to crates.io
+    needs: [resolve-version]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: release
@@ -29,7 +37,7 @@ jobs:
 
       - uses: inference-labs-inc/set-toml-version@ff9a4b64df4ce91067737822d2811a69597bf688 # v1
         with:
-          version: ${{ github.event.release.tag_name }}
+          version: ${{ needs.resolve-version.outputs.version }}
           files: crates/btlightning/Cargo.toml
 
       - name: Verify only version fields changed
@@ -57,6 +65,7 @@ jobs:
 
   build-wheels:
     name: Build wheels - ${{ matrix.os }} ${{ matrix.target }}
+    needs: [resolve-version]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
@@ -78,7 +87,7 @@ jobs:
 
       - uses: inference-labs-inc/set-toml-version@ff9a4b64df4ce91067737822d2811a69597bf688 # v1
         with:
-          version: ${{ github.event.release.tag_name }}
+          version: ${{ needs.resolve-version.outputs.version }}
           files: |
             crates/btlightning/Cargo.toml
             crates/btlightning-py/Cargo.toml
@@ -112,6 +121,7 @@ jobs:
 
   build-sdist:
     name: Build sdist
+    needs: [resolve-version]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -119,7 +129,7 @@ jobs:
 
       - uses: inference-labs-inc/set-toml-version@ff9a4b64df4ce91067737822d2811a69597bf688 # v1
         with:
-          version: ${{ github.event.release.tag_name }}
+          version: ${{ needs.resolve-version.outputs.version }}
           files: |
             crates/btlightning/Cargo.toml
             crates/btlightning-py/Cargo.toml
@@ -144,14 +154,18 @@ jobs:
           name: sdist
           path: crates/btlightning-py/dist
 
-  upload-release-assets:
-    name: Upload release assets
+  create-release:
+    name: Create GitHub Release
     needs: [build-wheels, build-sdist]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
       - name: Download wheel artifacts
         uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8
         with:
@@ -165,11 +179,28 @@ jobs:
           name: sdist
           path: dist
 
-      - name: Upload assets to GitHub Release
-        run: gh release upload "$VERSION" dist/* --clobber
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
+      - name: Generate SHA256SUMS
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS
+
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: dist/*
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003 # v4.1.1
+
+      - name: Sign SHA256SUMS with cosign keyless
+        working-directory: dist
+        run: cosign sign-blob --yes --bundle SHA256SUMS.sigstore.json SHA256SUMS
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*
 
   publish-pypi:
     name: Publish to PyPI
