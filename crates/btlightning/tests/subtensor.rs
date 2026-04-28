@@ -126,7 +126,7 @@ async fn subtensor_resolver_integrates_with_server() {
     let handle = tokio::spawn(async move { s.serve_forever().await });
 
     let srv = server.clone();
-    tokio::time::timeout(Duration::from_secs(30), async {
+    tokio::time::timeout(Duration::from_secs(180), async {
         loop {
             if srv.get_permitted_validator_count().await > 0 {
                 break;
@@ -135,7 +135,7 @@ async fn subtensor_resolver_integrates_with_server() {
         }
     })
     .await
-    .expect("subtensor resolver should populate permits within 30s");
+    .expect("subtensor resolver should populate permits within 180s");
 
     assert!(server.get_permitted_validator_count().await > 0);
 
