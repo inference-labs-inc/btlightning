@@ -44,15 +44,20 @@ fn threshold_ms(env_var: &str, default: u64) -> Duration {
     )
 }
 
-async fn submit_extrinsic(
+async fn submit_extrinsic<Call: subxt::tx::Payload>(
     api: &OnlineClient<PolkadotConfig>,
-    call: subxt::tx::DynamicPayload,
+    call: Call,
     signer: &subxt_signer::sr25519::Keypair,
     label: &str,
 ) {
+    let at = api
+        .at_current_block()
+        .await
+        .unwrap_or_else(|e| panic!("{label} at_current_block failed: {e}"));
+    let mut tx = at.transactions();
     let progress = tokio::time::timeout(
         Duration::from_secs(30),
-        api.tx().sign_and_submit_then_watch_default(&call, signer),
+        tx.sign_and_submit_then_watch_default(&call, signer),
     )
     .await
     .unwrap_or_else(|_| panic!("{label} submission timed out after 30s"))
@@ -68,14 +73,15 @@ async fn submit_extrinsic(
 }
 
 async fn query_total_networks(api: &OnlineClient<PolkadotConfig>) -> u16 {
-    let query = subxt::dynamic::storage("SubtensorModule", "TotalNetworks", vec![]);
-    let storage = api.storage().at_latest().await.unwrap();
-    storage
-        .fetch(&query)
+    let query: subxt::storage::DynamicAddress =
+        subxt::dynamic::storage("SubtensorModule", "TotalNetworks");
+    let at = api.at_current_block().await.unwrap();
+    at.storage()
+        .try_fetch(query, Vec::<Value>::new())
         .await
         .unwrap()
         .unwrap()
-        .to_value()
+        .decode()
         .unwrap()
         .as_u128()
         .and_then(|v| u16::try_from(v).ok())

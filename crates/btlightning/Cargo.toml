@@ -37,7 +37,7 @@ tokio = { version = "1.0", features = ["full", "test-util"] }
 proptest = "1"
 serde_json = "1"
 anyhow = "1"
-subxt-signer = { version = "0.38", features = ["sr25519"] }
+subxt-signer = { version = "0.50", features = ["sr25519"] }
 tempfile = "3"
 
 [features]
@@ -51,6 +51,7 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies.subxt]
-version = "0.38"
+version = "0.50"
 optional = true
-features = ["substrate-compat"]
+default-features = false
+features = ["jsonrpsee", "native"]
