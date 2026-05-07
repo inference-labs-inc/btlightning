@@ -35,6 +35,21 @@ pub trait ValidatorPermitResolver: Send + Sync {
     fn resolve_permitted_validators(&self) -> Result<HashSet<String>>;
 }
 
+/// Resolves the set of source IP addresses allowed to initiate a QUIC connection.
+///
+/// Called periodically by the server (interval controlled by
+/// [`LightningServerConfig::source_allowlist_refresh_secs`]). The returned set is
+/// matched against the IP component of each incoming connection's remote address
+/// before any QUIC state is allocated; non-matching peers are silently dropped to
+/// avoid amplifying reflected floods.
+///
+/// Typical implementations resolve validator axon endpoints from the on-chain
+/// metagraph and return the set of distinct IPs.
+pub trait SourceAddressResolver: Send + Sync {
+    /// Returns the current set of allowed source IP addresses.
+    fn resolve_allowed_sources(&self) -> Result<HashSet<IpAddr>>;
+}
+
 /// Synchronous synapse request handler.
 ///
 /// Runs on a blocking thread. Use [`AsyncSynapseHandler`] for async work or
@@ -166,6 +181,8 @@ struct ServerContext {
     handshake_rate: Arc<RwLock<HashMap<IpAddr, Vec<u64>>>>,
     permit_resolver: Option<Arc<dyn ValidatorPermitResolver>>,
     permitted_validators: Arc<RwLock<HashSet<String>>>,
+    source_resolver: Option<Arc<dyn SourceAddressResolver>>,
+    allowed_sources: Arc<RwLock<HashSet<IpAddr>>>,
     miner_hotkey: String,
     miner_signer: Option<Arc<dyn Signer>>,
     cert_fingerprint: Arc<RwLock<Option<[u8; 32]>>>,
@@ -183,6 +200,7 @@ pub struct LightningServer {
     endpoint: Option<Endpoint>,
     cleanup_handle: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
     permit_refresh_handle: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
+    source_refresh_handle: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
 }
 
 macro_rules! register_handler {
@@ -227,6 +245,8 @@ impl LightningServer {
                 handshake_rate: Arc::new(RwLock::new(HashMap::new())),
                 permit_resolver: None,
                 permitted_validators: Arc::new(RwLock::new(HashSet::new())),
+                source_resolver: None,
+                allowed_sources: Arc::new(RwLock::new(HashSet::new())),
                 miner_hotkey,
                 miner_signer: None,
                 cert_fingerprint: Arc::new(RwLock::new(None)),
@@ -235,6 +255,7 @@ impl LightningServer {
             endpoint: None,
             cleanup_handle: Arc::new(tokio::sync::Mutex::new(None)),
             permit_refresh_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            source_refresh_handle: Arc::new(tokio::sync::Mutex::new(None)),
         })
     }
 
@@ -251,6 +272,12 @@ impl LightningServer {
     /// Sets the [`ValidatorPermitResolver`] used to gate incoming connections.
     pub fn set_validator_permit_resolver(&mut self, resolver: Box<dyn ValidatorPermitResolver>) {
         self.ctx.permit_resolver = Some(Arc::from(resolver));
+    }
+
+    /// Sets the [`SourceAddressResolver`] used to drop connections from non-allowlisted IPs
+    /// before any QUIC state is allocated.
+    pub fn set_source_address_resolver(&mut self, resolver: Box<dyn SourceAddressResolver>) {
+        self.ctx.source_resolver = Some(Arc::from(resolver));
     }
 
     /// Loads the miner signer from a Bittensor wallet on disk. Requires the `btwallet` feature.
@@ -392,6 +419,18 @@ impl LightningServer {
             info!("Validator permit checking is disabled -- any hotkey with a valid signature can connect");
         }
 
+        if self.ctx.config.enforce_source_allowlist && self.ctx.source_resolver.is_none() {
+            return Err(LightningError::Config(
+                "enforce_source_allowlist is enabled but no SourceAddressResolver is configured"
+                    .to_string(),
+            ));
+        }
+        if self.ctx.config.require_address_validation {
+            info!(
+                "QUIC address validation enabled -- all clients must complete a Retry round-trip"
+            );
+        }
+
         {
             let mut guard = self.cleanup_handle.lock().await;
             if let Some(old) = guard.take() {
@@ -478,8 +517,88 @@ impl LightningServer {
             *self.permit_refresh_handle.lock().await = Some(permit_handle);
         }
 
+        {
+            let mut guard = self.source_refresh_handle.lock().await;
+            if let Some(old) = guard.take() {
+                old.abort();
+            }
+        }
+
+        if let Some(resolver) = &self.ctx.source_resolver {
+            let r = resolver.clone();
+            match tokio::task::spawn_blocking(move || r.resolve_allowed_sources()).await {
+                Ok(Ok(set)) => {
+                    info!(
+                        "Initial source-address allowlist resolution: {} allowed IPs",
+                        set.len()
+                    );
+                    *self.ctx.allowed_sources.write().await = set;
+                }
+                Ok(Err(e)) => {
+                    error!("Initial source-address allowlist resolution failed: {}", e);
+                }
+                Err(e) => {
+                    error!(
+                        "Initial source-address allowlist resolution task panicked: {}",
+                        e
+                    );
+                }
+            }
+
+            let resolver = resolver.clone();
+            let allowed = self.ctx.allowed_sources.clone();
+            let refresh_secs = self.ctx.config.source_allowlist_refresh_secs;
+            let source_handle = tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(refresh_secs));
+                interval.tick().await;
+                loop {
+                    interval.tick().await;
+                    let r = resolver.clone();
+                    match tokio::task::spawn_blocking(move || r.resolve_allowed_sources()).await {
+                        Ok(Ok(set)) => {
+                            info!(
+                                "Refreshed source-address allowlist: {} allowed IPs",
+                                set.len()
+                            );
+                            *allowed.write().await = set;
+                        }
+                        Ok(Err(e)) => {
+                            error!("Source-address allowlist resolution failed: {}", e);
+                        }
+                        Err(e) => {
+                            error!("Source-address allowlist resolution task panicked: {}", e);
+                        }
+                    }
+                }
+            });
+            *self.source_refresh_handle.lock().await = Some(source_handle);
+        }
+
         while let Some(conn) = endpoint.accept().await {
             let ctx = self.ctx.clone();
+
+            if ctx.config.enforce_source_allowlist {
+                let allowed = ctx.allowed_sources.read().await;
+                if !allowed.contains(&conn.remote_address().ip()) {
+                    drop(allowed);
+                    conn.ignore();
+                    continue;
+                }
+            }
+
+            if ctx.config.require_address_validation
+                && !conn.remote_address_validated()
+                && conn.may_retry()
+            {
+                if let Err(e) = conn.retry() {
+                    warn!(
+                        "Failed to issue Retry packet to {}: {}",
+                        e.into_incoming().remote_address(),
+                        "remote already presented a token"
+                    );
+                }
+                continue;
+            }
 
             {
                 let connections = ctx.connections.read().await;
@@ -591,6 +710,11 @@ impl LightningServer {
         self.ctx.permitted_validators.read().await.len()
     }
 
+    /// Returns the number of source IPs in the current allowlist.
+    pub async fn get_allowed_source_count(&self) -> usize {
+        self.ctx.allowed_sources.read().await.len()
+    }
+
     /// Manually evicts expired nonces from the replay-protection set.
     #[instrument(skip(self))]
     pub async fn cleanup_expired_nonces(&self) {
@@ -612,6 +736,9 @@ impl LightningServer {
             handle.abort();
         }
         if let Some(handle) = self.permit_refresh_handle.lock().await.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.source_refresh_handle.lock().await.take() {
             handle.abort();
         }
 
@@ -639,6 +766,11 @@ impl Drop for LightningServer {
             }
         }
         if let Ok(mut guard) = self.permit_refresh_handle.try_lock() {
+            if let Some(handle) = guard.take() {
+                handle.abort();
+            }
+        }
+        if let Ok(mut guard) = self.source_refresh_handle.try_lock() {
             if let Some(handle) = guard.take() {
                 handle.abort();
             }
@@ -904,6 +1036,8 @@ mod tests {
             handshake_rate: Arc::new(RwLock::new(HashMap::new())),
             permit_resolver: None,
             permitted_validators: Arc::new(RwLock::new(HashSet::new())),
+            source_resolver: None,
+            allowed_sources: Arc::new(RwLock::new(HashSet::new())),
             miner_hotkey: String::new(),
             miner_signer: None,
             cert_fingerprint: Arc::new(RwLock::new(None)),
@@ -1498,6 +1632,83 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("no miner signer configured"));
+    }
+
+    #[test]
+    fn config_rejects_zero_source_allowlist_refresh() {
+        let config = LightningServerConfig {
+            source_allowlist_refresh_secs: 0,
+            ..Default::default()
+        };
+        let result = LightningServer::with_config("test".into(), "0.0.0.0".into(), 8443, config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_defaults_address_validation_enabled() {
+        let config = LightningServerConfig::default();
+        assert!(config.require_address_validation);
+        assert!(!config.enforce_source_allowlist);
+        assert_eq!(config.source_allowlist_refresh_secs, 300);
+    }
+
+    #[tokio::test]
+    async fn serve_forever_rejects_allowlist_without_resolver() {
+        let config = LightningServerConfig::builder()
+            .enforce_source_allowlist(true)
+            .build()
+            .unwrap();
+        let mut server =
+            LightningServer::with_config("test".into(), "127.0.0.1".into(), 0, config).unwrap();
+        server.start().await.unwrap();
+        let err = server.serve_forever().await.unwrap_err();
+        assert!(
+            err.to_string().contains("SourceAddressResolver"),
+            "missing resolver must produce a config error, got: {}",
+            err
+        );
+    }
+
+    struct StaticSourceResolver(HashSet<IpAddr>);
+    impl SourceAddressResolver for StaticSourceResolver {
+        fn resolve_allowed_sources(&self) -> Result<HashSet<IpAddr>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn source_resolver_populates_allowed_sources() {
+        let mut allowed = HashSet::new();
+        allowed.insert("10.20.30.40".parse::<IpAddr>().unwrap());
+        allowed.insert("203.0.113.7".parse::<IpAddr>().unwrap());
+
+        let config = LightningServerConfig::builder()
+            .enforce_source_allowlist(true)
+            .require_address_validation(false)
+            .source_allowlist_refresh_secs(3600)
+            .build()
+            .unwrap();
+        let mut server =
+            LightningServer::with_config("test".into(), "127.0.0.1".into(), 0, config).unwrap();
+        server.start().await.unwrap();
+        server.set_source_address_resolver(Box::new(StaticSourceResolver(allowed.clone())));
+
+        let server = Arc::new(server);
+        let s = server.clone();
+        let serve_handle = tokio::spawn(async move {
+            let _ = s.serve_forever().await;
+        });
+
+        for _ in 0..50 {
+            if server.get_allowed_source_count().await == allowed.len() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(server.get_allowed_source_count().await, allowed.len());
+
+        server.stop().await.unwrap();
+        serve_handle.abort();
     }
 
     #[tokio::test]

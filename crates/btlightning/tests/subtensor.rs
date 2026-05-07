@@ -151,9 +151,8 @@ async fn subtensor_resolver_integrates_with_server() {
 async fn subtensor_resolver_handles_invalid_netuid() {
     let resolver = SubtensorPermitResolver::new(TESTNET_ENDPOINT.to_string(), 65535);
     let result = resolver.resolve_async().await;
-    match result {
-        Ok(set) => assert!(set.is_empty(), "invalid netuid should return empty set"),
-        Err(_) => {}
+    if let Ok(set) = result {
+        assert!(set.is_empty(), "invalid netuid should return empty set");
     }
 }
 

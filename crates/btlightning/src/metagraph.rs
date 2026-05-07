@@ -288,6 +288,18 @@ impl Metagraph {
             .collect()
     }
 
+    /// Returns the set of source IP addresses for neurons holding a `validator_permit`,
+    /// suitable for use as a [`SourceAddressResolver`](crate::SourceAddressResolver) backing.
+    /// Neurons without a routable axon IP are skipped.
+    pub fn validator_axon_ips(&self) -> std::collections::HashSet<std::net::IpAddr> {
+        self.neurons
+            .iter()
+            .filter(|n| n.validator_permit)
+            .filter(|n| !n.axon_ip.is_empty() && is_valid_ip(&n.axon_ip))
+            .filter_map(|n| n.axon_ip.parse::<std::net::IpAddr>().ok())
+            .collect()
+    }
+
     /// Looks up a neuron by UID.
     pub fn get_neuron(&self, uid: u16) -> Option<&NeuronInfo> {
         self.neurons.iter().find(|n| n.uid == uid)
