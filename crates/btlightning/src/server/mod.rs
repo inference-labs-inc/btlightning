@@ -528,20 +528,39 @@ impl LightningServer {
             let r = resolver.clone();
             match tokio::task::spawn_blocking(move || r.resolve_allowed_sources()).await {
                 Ok(Ok(set)) => {
+                    let len = set.len();
                     info!(
                         "Initial source-address allowlist resolution: {} allowed IPs",
-                        set.len()
+                        len
                     );
                     *self.ctx.allowed_sources.write().await = set;
+                    if len == 0 && self.ctx.config.enforce_source_allowlist {
+                        warn!(
+                            refresh_secs = self.ctx.config.source_allowlist_refresh_secs,
+                            "source-address allowlist is empty under enforce_source_allowlist=true; ALL connections will be silently dropped until the resolver returns a non-empty set"
+                        );
+                    }
                 }
                 Ok(Err(e)) => {
                     error!("Initial source-address allowlist resolution failed: {}", e);
+                    if self.ctx.config.enforce_source_allowlist {
+                        warn!(
+                            refresh_secs = self.ctx.config.source_allowlist_refresh_secs,
+                            "enforce_source_allowlist=true with no resolved IPs; ALL connections will be silently dropped until the next refresh succeeds"
+                        );
+                    }
                 }
                 Err(e) => {
                     error!(
                         "Initial source-address allowlist resolution task panicked: {}",
                         e
                     );
+                    if self.ctx.config.enforce_source_allowlist {
+                        warn!(
+                            refresh_secs = self.ctx.config.source_allowlist_refresh_secs,
+                            "enforce_source_allowlist=true with no resolved IPs; ALL connections will be silently dropped until the next refresh succeeds"
+                        );
+                    }
                 }
             }
 
@@ -591,11 +610,11 @@ impl LightningServer {
                 && conn.may_retry()
             {
                 if let Err(e) = conn.retry() {
-                    warn!(
-                        "Failed to issue Retry packet to {}: {}",
-                        e.into_incoming().remote_address(),
-                        "remote already presented a token"
-                    );
+                    let reason = e.to_string();
+                    let recovered = e.into_incoming();
+                    let addr = recovered.remote_address();
+                    warn!(error = %reason, %addr, "conn.retry() refused, dropping incoming");
+                    recovered.ignore();
                 }
                 continue;
             }

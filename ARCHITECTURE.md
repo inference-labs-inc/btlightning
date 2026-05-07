@@ -163,6 +163,7 @@ On reconnect from the same hotkey, the old connection is explicitly closed with 
 Background tasks run alongside `serve_forever`:
 - **Nonce cleanup**: evicts expired nonces and stale rate-limit entries (interval: `nonce_cleanup_interval_secs`)
 - **Permit refresh**: re-resolves the permitted validator set via `ValidatorPermitResolver` (interval: `validator_permit_refresh_secs`)
+- **Source-address allowlist refresh**: re-resolves the allowlisted source IPs via `SourceAddressResolver` (interval: `source_allowlist_refresh_secs`)
 
 ## Request/Response Flow
 
