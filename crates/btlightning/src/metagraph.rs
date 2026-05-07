@@ -288,6 +288,18 @@ impl Metagraph {
             .collect()
     }
 
+    /// Returns the set of source IP addresses for neurons holding a `validator_permit`,
+    /// suitable for use as a [`SourceAddressResolver`](crate::SourceAddressResolver) backing.
+    /// Neurons without a routable axon IP are skipped.
+    pub fn validator_axon_ips(&self) -> std::collections::HashSet<std::net::IpAddr> {
+        self.neurons
+            .iter()
+            .filter(|n| n.validator_permit)
+            .filter(|n| !n.axon_ip.is_empty() && is_valid_ip(&n.axon_ip))
+            .filter_map(|n| n.axon_ip.parse::<std::net::IpAddr>().ok())
+            .collect()
+    }
+
     /// Looks up a neuron by UID.
     pub fn get_neuron(&self, uid: u16) -> Option<&NeuronInfo> {
         self.neurons.iter().find(|n| n.uid == uid)
@@ -709,5 +721,77 @@ mod tests {
         };
 
         assert!(metagraph.quic_miners().is_empty());
+    }
+
+    #[test]
+    fn validator_axon_ips_filters_correctly() {
+        let metagraph = Metagraph {
+            netuid: 1,
+            n: 5,
+            block: 100,
+            hotkey_to_uid: HashMap::new(),
+            neurons: vec![
+                NeuronInfo {
+                    uid: 0,
+                    hotkey: "validator_routable".into(),
+                    stake: 0,
+                    is_active: true,
+                    axon_ip: "8.8.8.8".into(),
+                    axon_port: 8091,
+                    axon_protocol: 4,
+                    validator_permit: true,
+                },
+                NeuronInfo {
+                    uid: 1,
+                    hotkey: "validator_no_axon".into(),
+                    stake: 0,
+                    is_active: true,
+                    axon_ip: String::new(),
+                    axon_port: 0,
+                    axon_protocol: 4,
+                    validator_permit: true,
+                },
+                NeuronInfo {
+                    uid: 2,
+                    hotkey: "validator_private_rejected".into(),
+                    stake: 0,
+                    is_active: true,
+                    axon_ip: "10.0.0.1".into(),
+                    axon_port: 8091,
+                    axon_protocol: 4,
+                    validator_permit: true,
+                },
+                NeuronInfo {
+                    uid: 3,
+                    hotkey: "validator_garbage_ip".into(),
+                    stake: 0,
+                    is_active: true,
+                    axon_ip: "not-an-ip".into(),
+                    axon_port: 8091,
+                    axon_protocol: 4,
+                    validator_permit: true,
+                },
+                NeuronInfo {
+                    uid: 4,
+                    hotkey: "miner_with_routable_ip".into(),
+                    stake: 0,
+                    is_active: true,
+                    axon_ip: "9.9.9.9".into(),
+                    axon_port: 8091,
+                    axon_protocol: 4,
+                    validator_permit: false,
+                },
+            ],
+        };
+
+        let ips = metagraph.validator_axon_ips();
+        assert_eq!(
+            ips.len(),
+            1,
+            "only the routable permit-holder should appear"
+        );
+        assert!(ips.contains(&"8.8.8.8".parse::<std::net::IpAddr>().unwrap()));
+        assert!(!ips.contains(&"10.0.0.1".parse::<std::net::IpAddr>().unwrap()));
+        assert!(!ips.contains(&"9.9.9.9".parse::<std::net::IpAddr>().unwrap()));
     }
 }

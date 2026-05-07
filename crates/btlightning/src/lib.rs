@@ -20,8 +20,8 @@ pub use metagraph::{
 };
 pub use server::{
     typed_async_handler, typed_handler, AsyncSynapseHandler, LightningServer,
-    LightningServerConfig, LightningServerConfigBuilder, StreamingSynapseHandler, SynapseHandler,
-    ValidatorPermitResolver,
+    LightningServerConfig, LightningServerConfigBuilder, SourceAddressResolver,
+    StreamingSynapseHandler, SynapseHandler, ValidatorPermitResolver,
 };
 #[cfg(feature = "btwallet")]
 pub use signing::BtWalletSigner;

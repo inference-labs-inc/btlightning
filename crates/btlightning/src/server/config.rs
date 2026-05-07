@@ -38,6 +38,12 @@ pub struct LightningServerConfig {
     pub max_frame_payload_bytes: usize,
     /// Capacity of the `mpsc` channel between streaming handlers and the frame writer. Default: 32.
     pub streaming_channel_buffer: usize,
+    /// When true, only source IPs returned by [`SourceAddressResolver`](super::SourceAddressResolver) can establish a connection. Default: false.
+    pub enforce_source_allowlist: bool,
+    /// Interval for refreshing the source-address allowlist cache. Default: 300s.
+    pub source_allowlist_refresh_secs: u64,
+    /// When true, send a QUIC Retry packet to any client whose remote address has not yet been validated, forcing a round-trip before connection state is allocated. Default: true.
+    pub require_address_validation: bool,
 }
 
 impl Default for LightningServerConfig {
@@ -58,6 +64,9 @@ impl Default for LightningServerConfig {
             handler_timeout_secs: 30,
             max_frame_payload_bytes: DEFAULT_MAX_FRAME_PAYLOAD,
             streaming_channel_buffer: 32,
+            enforce_source_allowlist: false,
+            source_allowlist_refresh_secs: 300,
+            require_address_validation: true,
         }
     }
 }
@@ -116,6 +125,7 @@ impl LightningServerConfig {
         require_nonzero!(self, handler_timeout_secs);
         require_less_than!(self, handler_timeout_secs < idle_timeout_secs);
         require_nonzero!(self, streaming_channel_buffer);
+        require_nonzero!(self, source_allowlist_refresh_secs);
         if self.max_frame_payload_bytes < 1_048_576 {
             return Err(LightningError::Config(format!(
                 "max_frame_payload_bytes ({}) must be at least 1048576 (1 MB)",
@@ -196,6 +206,18 @@ impl LightningServerConfigBuilder {
     }
     pub fn streaming_channel_buffer(mut self, val: usize) -> Self {
         self.config.streaming_channel_buffer = val;
+        self
+    }
+    pub fn enforce_source_allowlist(mut self, val: bool) -> Self {
+        self.config.enforce_source_allowlist = val;
+        self
+    }
+    pub fn source_allowlist_refresh_secs(mut self, val: u64) -> Self {
+        self.config.source_allowlist_refresh_secs = val;
+        self
+    }
+    pub fn require_address_validation(mut self, val: bool) -> Self {
+        self.config.require_address_validation = val;
         self
     }
     pub fn build(self) -> Result<LightningServerConfig> {

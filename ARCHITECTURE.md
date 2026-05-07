@@ -94,6 +94,16 @@ The server maintains a `HashMap<String, u64>` of used nonces (nonce → timestam
 
 When `require_validator_permit` is enabled, the server resolves permitted validators through the `ValidatorPermitResolver` trait (typically backed by a Bittensor metagraph query). The permitted set is cached and refreshed on a background task every `validator_permit_refresh_secs` (default 1800s). Validators not in the cached set are rejected at handshake.
 
+### Source-Address Allowlist
+
+When `enforce_source_allowlist` is enabled, the server resolves the set of permitted source IPs through the `SourceAddressResolver` trait (typically backed by metagraph axon-IP enumeration; see `Metagraph::validator_axon_ips`). The set is cached and refreshed on a background task every `source_allowlist_refresh_secs` (default 300s).
+
+Filtering is applied at the `quinn::Incoming` boundary, before any QUIC state is allocated. Connections from non-allowlisted IPs are silently dropped via `Incoming::ignore()` rather than `refuse()`, so the server emits no response packets to attacker-controlled or spoofed sources — eliminating the reflection/amplification surface that `CONNECTION_CLOSE` would otherwise create under volumetric flood.
+
+### QUIC Address Validation (Retry)
+
+When `require_address_validation` is enabled (default `true`), unvalidated incoming connections are answered with a QUIC `Retry` packet via `Incoming::retry()`. The client must re-issue its Initial with the server-issued retry token, proving it can receive traffic at its claimed source address before any handshake state is allocated. This defeats spoofed-source Initial floods at the cost of one additional round trip on first connection; once a path is validated within an active connection, subsequent reconnections to the same address can be admitted without further Retry. Retry token lifetime is governed by quinn's default (15s).
+
 ## Transport Layer
 
 ### QUIC Configuration
@@ -153,6 +163,7 @@ On reconnect from the same hotkey, the old connection is explicitly closed with 
 Background tasks run alongside `serve_forever`:
 - **Nonce cleanup**: evicts expired nonces and stale rate-limit entries (interval: `nonce_cleanup_interval_secs`)
 - **Permit refresh**: re-resolves the permitted validator set via `ValidatorPermitResolver` (interval: `validator_permit_refresh_secs`)
+- **Source-address allowlist refresh**: re-resolves the allowlisted source IPs via `SourceAddressResolver` (interval: `source_allowlist_refresh_secs`)
 
 ## Request/Response Flow
 
@@ -209,6 +220,8 @@ Rate limiting applies only to the handshake phase, not to synapse requests on au
 **Per-IP handshake rate**: tracked as `HashMap<IpAddr, Vec<u64>>` (timestamps of recent attempts). Within a 60-second sliding window, a maximum of `max_handshake_attempts_per_minute` (default 30) handshakes are allowed per IP. When the tracking table reaches `max_tracked_rate_ips` (default 10,000), the least-recently-active IP is evicted before inserting a new one.
 
 Post-authentication, the only concurrency control is QUIC's `max_concurrent_bidi_streams` (default 128 per connection).
+
+For pre-handshake protection against volumetric floods, see [Source-Address Allowlist](#source-address-allowlist) and [QUIC Address Validation (Retry)](#quic-address-validation-retry). Both filter at the `quinn::Incoming` boundary, before any per-IP rate-limiter state is touched.
 
 ## Python Bindings
 
