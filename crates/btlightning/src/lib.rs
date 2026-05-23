@@ -19,8 +19,8 @@ pub use metagraph::{
     is_valid_ip, Metagraph, MetagraphMonitorConfig, NeuronInfo, FINNEY_ENDPOINT, TESTNET_ENDPOINT,
 };
 pub use server::{
-    typed_async_handler, typed_handler, AsyncSynapseHandler, LightningServer,
-    LightningServerConfig, LightningServerConfigBuilder, SourceAddressResolver,
+    typed_async_handler, typed_handler, AsyncSynapseHandler, HandshakeObserver, LightningServer,
+    LightningServerConfig, LightningServerConfigBuilder, SourceAddressResolver, SourceAllowlist,
     StreamingSynapseHandler, SynapseHandler, ValidatorPermitResolver,
 };
 #[cfg(feature = "btwallet")]

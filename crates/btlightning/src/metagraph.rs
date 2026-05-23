@@ -288,9 +288,12 @@ impl Metagraph {
             .collect()
     }
 
-    /// Returns the set of source IP addresses for neurons holding a `validator_permit`,
-    /// suitable for use as a [`SourceAddressResolver`](crate::SourceAddressResolver) backing.
-    /// Neurons without a routable axon IP are skipped.
+    /// Returns the set of source IP addresses for neurons holding a `validator_permit`.
+    /// Wrap with [`SourceAllowlist::Enforce`](crate::SourceAllowlist::Enforce) when feeding a
+    /// [`SourceAddressResolver`](crate::SourceAddressResolver) implementation. Neurons without
+    /// a routable axon IP are skipped, so subnets where validators do not `serve_axon` will
+    /// produce an empty set and should return [`SourceAllowlist::Bypass`] instead of feeding
+    /// it through as `Enforce`, otherwise every connection is silently dropped.
     pub fn validator_axon_ips(&self) -> std::collections::HashSet<std::net::IpAddr> {
         self.neurons
             .iter()
