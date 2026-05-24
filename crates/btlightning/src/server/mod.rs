@@ -35,19 +35,50 @@ pub trait ValidatorPermitResolver: Send + Sync {
     fn resolve_permitted_validators(&self) -> Result<HashSet<String>>;
 }
 
-/// Resolves the set of source IP addresses allowed to initiate a QUIC connection.
+/// Outcome returned by [`SourceAddressResolver::resolve_allowed_sources`].
+///
+/// `Bypass` lets the resolver opt out of source-IP enforcement for a refresh
+/// cycle without flipping the server-level `enforce_source_allowlist` flag.
+/// This avoids the previous footgun where an empty `HashSet` under
+/// `enforce_source_allowlist=true` silently dropped every incoming packet:
+/// resolvers that haven't yet learned a meaningful allowlist now have to
+/// explicitly choose between `Bypass` (fail-open) and `Enforce(empty)`
+/// (fail-closed).
+#[derive(Debug, Clone)]
+pub enum SourceAllowlist {
+    /// Skip source-IP enforcement for this refresh cycle.
+    Bypass,
+    /// Drop sources whose IP is not present in this set.
+    Enforce(HashSet<IpAddr>),
+}
+
+/// Resolves the source-IP enforcement policy for the QUIC listener.
 ///
 /// Called periodically by the server (interval controlled by
-/// [`LightningServerConfig::source_allowlist_refresh_secs`]). The returned set is
-/// matched against the IP component of each incoming connection's remote address
-/// before any QUIC state is allocated; non-matching peers are silently dropped to
-/// avoid amplifying reflected floods.
-///
-/// Typical implementations resolve validator axon endpoints from the on-chain
-/// metagraph and return the set of distinct IPs.
+/// [`LightningServerConfig::source_allowlist_refresh_secs`]). When the policy
+/// is [`SourceAllowlist::Enforce`], the set is matched against the IP
+/// component of each incoming connection's remote address before any QUIC
+/// state is allocated; non-matching peers are silently dropped to avoid
+/// amplifying reflected floods.
 pub trait SourceAddressResolver: Send + Sync {
-    /// Returns the current set of allowed source IP addresses.
-    fn resolve_allowed_sources(&self) -> Result<HashSet<IpAddr>>;
+    /// Returns the current source-IP enforcement policy.
+    fn resolve_allowed_sources(&self) -> Result<SourceAllowlist>;
+}
+
+/// Notified whenever a handshake completes successfully.
+///
+/// Implementations can use this to opportunistically learn the (hotkey,
+/// source-IP) mapping for downstream policy decisions (e.g., growing a
+/// trust-on-first-use allowlist that flips to enforcement once a stake-weighted
+/// coverage threshold is met). Invocations happen on a detached task and must
+/// not block — long work belongs on a separate worker.
+#[async_trait::async_trait]
+pub trait HandshakeObserver: Send + Sync {
+    /// Called after a handshake is fully accepted. `validator_hotkey` is the
+    /// SS58-encoded sr25519 public key that signed the handshake; `source_ip`
+    /// is the verified remote address (QUIC retry-token address validation
+    /// guarantees this is the real source when enabled).
+    async fn observe_successful_handshake(&self, validator_hotkey: &str, source_ip: IpAddr);
 }
 
 /// Synchronous synapse request handler.
@@ -157,6 +188,31 @@ pub(super) fn evict_stale_nonces(
     }
 }
 
+fn log_source_allowlist_update(policy: &SourceAllowlist, enforce_flag: bool, is_initial: bool) {
+    let prefix = if is_initial {
+        "Initial source-address allowlist resolution"
+    } else {
+        "Refreshed source-address allowlist"
+    };
+    match policy {
+        SourceAllowlist::Bypass => {
+            info!(
+                "{}: bypass (source-IP enforcement skipped this cycle)",
+                prefix
+            );
+        }
+        SourceAllowlist::Enforce(set) => {
+            let len = set.len();
+            info!("{}: enforce ({} allowed IPs)", prefix, len);
+            if len == 0 && enforce_flag {
+                warn!(
+                    "source-address allowlist is empty under enforce_source_allowlist=true; ALL connections will be silently dropped until the resolver returns Bypass or a non-empty Enforce set"
+                );
+            }
+        }
+    }
+}
+
 pub(super) fn remove_hotkey_from_maps(
     connections: &mut HashMap<String, ValidatorConnection>,
     addr_to_hotkey: &mut HashMap<SocketAddr, String>,
@@ -182,7 +238,8 @@ struct ServerContext {
     permit_resolver: Option<Arc<dyn ValidatorPermitResolver>>,
     permitted_validators: Arc<RwLock<HashSet<String>>>,
     source_resolver: Option<Arc<dyn SourceAddressResolver>>,
-    allowed_sources: Arc<RwLock<HashSet<IpAddr>>>,
+    allowed_sources: Arc<RwLock<SourceAllowlist>>,
+    pub(super) handshake_observer: Option<Arc<dyn HandshakeObserver>>,
     miner_hotkey: String,
     miner_signer: Option<Arc<dyn Signer>>,
     cert_fingerprint: Arc<RwLock<Option<[u8; 32]>>>,
@@ -246,7 +303,8 @@ impl LightningServer {
                 permit_resolver: None,
                 permitted_validators: Arc::new(RwLock::new(HashSet::new())),
                 source_resolver: None,
-                allowed_sources: Arc::new(RwLock::new(HashSet::new())),
+                allowed_sources: Arc::new(RwLock::new(SourceAllowlist::Enforce(HashSet::new()))),
+                handshake_observer: None,
                 miner_hotkey,
                 miner_signer: None,
                 cert_fingerprint: Arc::new(RwLock::new(None)),
@@ -278,6 +336,13 @@ impl LightningServer {
     /// before any QUIC state is allocated.
     pub fn set_source_address_resolver(&mut self, resolver: Box<dyn SourceAddressResolver>) {
         self.ctx.source_resolver = Some(Arc::from(resolver));
+    }
+
+    /// Registers a [`HandshakeObserver`] invoked after every successful handshake.
+    /// Used by trust-on-first-use allowlist implementations to learn the
+    /// (validator hotkey, source IP) mapping from live traffic.
+    pub fn set_handshake_observer(&mut self, observer: Arc<dyn HandshakeObserver>) {
+        self.ctx.handshake_observer = Some(observer);
     }
 
     /// Loads the miner signer from a Bittensor wallet on disk. Requires the `btwallet` feature.
@@ -527,26 +592,20 @@ impl LightningServer {
         if let Some(resolver) = &self.ctx.source_resolver {
             let r = resolver.clone();
             match tokio::task::spawn_blocking(move || r.resolve_allowed_sources()).await {
-                Ok(Ok(set)) => {
-                    let len = set.len();
-                    info!(
-                        "Initial source-address allowlist resolution: {} allowed IPs",
-                        len
+                Ok(Ok(policy)) => {
+                    log_source_allowlist_update(
+                        &policy,
+                        self.ctx.config.enforce_source_allowlist,
+                        true,
                     );
-                    *self.ctx.allowed_sources.write().await = set;
-                    if len == 0 && self.ctx.config.enforce_source_allowlist {
-                        warn!(
-                            refresh_secs = self.ctx.config.source_allowlist_refresh_secs,
-                            "source-address allowlist is empty under enforce_source_allowlist=true; ALL connections will be silently dropped until the resolver returns a non-empty set"
-                        );
-                    }
+                    *self.ctx.allowed_sources.write().await = policy;
                 }
                 Ok(Err(e)) => {
                     error!("Initial source-address allowlist resolution failed: {}", e);
                     if self.ctx.config.enforce_source_allowlist {
                         warn!(
                             refresh_secs = self.ctx.config.source_allowlist_refresh_secs,
-                            "enforce_source_allowlist=true with no resolved IPs; ALL connections will be silently dropped until the next refresh succeeds"
+                            "enforce_source_allowlist=true with no resolved policy; the prior fail-closed empty allowlist remains until the next refresh succeeds"
                         );
                     }
                 }
@@ -558,7 +617,7 @@ impl LightningServer {
                     if self.ctx.config.enforce_source_allowlist {
                         warn!(
                             refresh_secs = self.ctx.config.source_allowlist_refresh_secs,
-                            "enforce_source_allowlist=true with no resolved IPs; ALL connections will be silently dropped until the next refresh succeeds"
+                            "enforce_source_allowlist=true with no resolved policy; the prior fail-closed empty allowlist remains until the next refresh succeeds"
                         );
                     }
                 }
@@ -567,6 +626,7 @@ impl LightningServer {
             let resolver = resolver.clone();
             let allowed = self.ctx.allowed_sources.clone();
             let refresh_secs = self.ctx.config.source_allowlist_refresh_secs;
+            let enforce_flag = self.ctx.config.enforce_source_allowlist;
             let source_handle = tokio::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(refresh_secs));
                 interval.tick().await;
@@ -574,12 +634,9 @@ impl LightningServer {
                     interval.tick().await;
                     let r = resolver.clone();
                     match tokio::task::spawn_blocking(move || r.resolve_allowed_sources()).await {
-                        Ok(Ok(set)) => {
-                            info!(
-                                "Refreshed source-address allowlist: {} allowed IPs",
-                                set.len()
-                            );
-                            *allowed.write().await = set;
+                        Ok(Ok(policy)) => {
+                            log_source_allowlist_update(&policy, enforce_flag, false);
+                            *allowed.write().await = policy;
                         }
                         Ok(Err(e)) => {
                             error!("Source-address allowlist resolution failed: {}", e);
@@ -598,10 +655,12 @@ impl LightningServer {
 
             if ctx.config.enforce_source_allowlist {
                 let allowed = ctx.allowed_sources.read().await;
-                if !allowed.contains(&conn.remote_address().ip()) {
-                    drop(allowed);
-                    conn.ignore();
-                    continue;
+                if let SourceAllowlist::Enforce(set) = &*allowed {
+                    if !set.contains(&conn.remote_address().ip()) {
+                        drop(allowed);
+                        conn.ignore();
+                        continue;
+                    }
                 }
             }
 
@@ -729,9 +788,24 @@ impl LightningServer {
         self.ctx.permitted_validators.read().await.len()
     }
 
-    /// Returns the number of source IPs in the current allowlist.
+    /// Returns the number of source IPs in the current allowlist, or `0` if the
+    /// current policy is [`SourceAllowlist::Bypass`]. Use
+    /// [`is_source_enforcement_bypassed`](Self::is_source_enforcement_bypassed)
+    /// to distinguish "bypass mode" from "enforce with empty set".
     pub async fn get_allowed_source_count(&self) -> usize {
-        self.ctx.allowed_sources.read().await.len()
+        match &*self.ctx.allowed_sources.read().await {
+            SourceAllowlist::Bypass => 0,
+            SourceAllowlist::Enforce(set) => set.len(),
+        }
+    }
+
+    /// Returns true when the current source-IP policy is
+    /// [`SourceAllowlist::Bypass`] (no enforcement this refresh cycle).
+    pub async fn is_source_enforcement_bypassed(&self) -> bool {
+        matches!(
+            &*self.ctx.allowed_sources.read().await,
+            SourceAllowlist::Bypass
+        )
     }
 
     /// Manually evicts expired nonces from the replay-protection set.
@@ -1056,7 +1130,8 @@ mod tests {
             permit_resolver: None,
             permitted_validators: Arc::new(RwLock::new(HashSet::new())),
             source_resolver: None,
-            allowed_sources: Arc::new(RwLock::new(HashSet::new())),
+            allowed_sources: Arc::new(RwLock::new(SourceAllowlist::Enforce(HashSet::new()))),
+            handshake_observer: None,
             miner_hotkey: String::new(),
             miner_signer: None,
             cert_fingerprint: Arc::new(RwLock::new(None)),
@@ -1690,8 +1765,15 @@ mod tests {
 
     struct StaticSourceResolver(HashSet<IpAddr>);
     impl SourceAddressResolver for StaticSourceResolver {
-        fn resolve_allowed_sources(&self) -> Result<HashSet<IpAddr>> {
-            Ok(self.0.clone())
+        fn resolve_allowed_sources(&self) -> Result<SourceAllowlist> {
+            Ok(SourceAllowlist::Enforce(self.0.clone()))
+        }
+    }
+
+    struct BypassSourceResolver;
+    impl SourceAddressResolver for BypassSourceResolver {
+        fn resolve_allowed_sources(&self) -> Result<SourceAllowlist> {
+            Ok(SourceAllowlist::Bypass)
         }
     }
 
@@ -1725,6 +1807,45 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert_eq!(server.get_allowed_source_count().await, allowed.len());
+
+        server.stop().await.unwrap();
+        serve_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn source_resolver_bypass_keeps_allowlist_empty_but_skips_drop() {
+        let config = LightningServerConfig::builder()
+            .enforce_source_allowlist(true)
+            .require_address_validation(false)
+            .source_allowlist_refresh_secs(3600)
+            .build()
+            .unwrap();
+        let mut server =
+            LightningServer::with_config("test".into(), "127.0.0.1".into(), 0, config).unwrap();
+        server.start().await.unwrap();
+        server.set_source_address_resolver(Box::new(BypassSourceResolver));
+
+        let server = Arc::new(server);
+        let s = server.clone();
+        let serve_handle = tokio::spawn(async move {
+            let _ = s.serve_forever().await;
+        });
+
+        for _ in 0..50 {
+            if server.is_source_enforcement_bypassed().await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            server.is_source_enforcement_bypassed().await,
+            "Bypass resolver should flip server into bypass policy"
+        );
+        assert_eq!(
+            server.get_allowed_source_count().await,
+            0,
+            "count is 0 under bypass policy"
+        );
 
         server.stop().await.unwrap();
         serve_handle.abort();

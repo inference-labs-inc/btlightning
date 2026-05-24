@@ -133,6 +133,15 @@ pub(super) async fn process_handshake(
         connection_id
     );
 
+    if let Some(observer) = ctx.handshake_observer.as_ref() {
+        let observer = observer.clone();
+        let hotkey = request.validator_hotkey.clone();
+        let ip = remote_addr.ip();
+        tokio::spawn(async move {
+            observer.observe_successful_handshake(&hotkey, ip).await;
+        });
+    }
+
     HandshakeResponse {
         miner_hotkey: ctx.miner_hotkey.clone(),
         timestamp: now,
