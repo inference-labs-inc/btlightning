@@ -37,13 +37,13 @@ impl SynapseHandler for PythonSynapseHandler {
 
             let result_bound = result.bind(py);
             let result_dict = result_bound
-                .downcast::<PyDict>()
+                .cast::<PyDict>()
                 .map_err(|e| LightningError::Handler(e.to_string()))?;
 
             let mut response_data = HashMap::new();
             for (key, value) in result_dict.iter() {
                 let key_str: String = key
-                    .extract()
+                    .extract::<String>()
                     .map_err(|e| LightningError::Handler(e.to_string()))?;
                 let value_msgpack = py_to_msgpack_value(&value)
                     .map_err(|e| LightningError::Handler(e.to_string()))?;
@@ -172,7 +172,7 @@ pub fn py_to_msgpack_value(value: &Bound<'_, pyo3::PyAny>) -> PyResult<rmpv::Val
         Ok(rmpv::Value::Integer(rmpv::Integer::from(i)))
     } else if let Ok(u) = value.extract::<u64>() {
         Ok(rmpv::Value::Integer(rmpv::Integer::from(u)))
-    } else if value.downcast::<PyInt>().is_ok() {
+    } else if value.cast::<PyInt>().is_ok() {
         Err(pyo3::exceptions::PyOverflowError::new_err(
             "integer too large for msgpack representation (must fit i64 or u64)",
         ))
@@ -180,13 +180,13 @@ pub fn py_to_msgpack_value(value: &Bound<'_, pyo3::PyAny>) -> PyResult<rmpv::Val
         Ok(rmpv::Value::F64(f))
     } else if let Ok(s) = value.extract::<String>() {
         Ok(rmpv::Value::String(rmpv::Utf8String::from(s.as_str())))
-    } else if let Ok(list) = value.downcast::<PyList>() {
+    } else if let Ok(list) = value.cast::<PyList>() {
         let mut arr = Vec::new();
         for item in list.iter() {
             arr.push(py_to_msgpack_value(&item)?);
         }
         Ok(rmpv::Value::Array(arr))
-    } else if let Ok(dict) = value.downcast::<PyDict>() {
+    } else if let Ok(dict) = value.cast::<PyDict>() {
         let mut entries = Vec::new();
         for (k, v) in dict.iter() {
             entries.push((py_to_msgpack_value(&k)?, py_to_msgpack_value(&v)?));
