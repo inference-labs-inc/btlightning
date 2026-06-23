@@ -1,7 +1,7 @@
 use btlightning::types::QuicAxonInfo as CoreQuicAxonInfo;
 use pyo3::prelude::*;
 
-#[pyclass(name = "QuicAxonInfo")]
+#[pyclass(name = "QuicAxonInfo", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyQuicAxonInfo {
     #[pyo3(get, set)]
