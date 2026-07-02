@@ -548,14 +548,25 @@ impl LightningClient {
     ) -> Result<QuicResponse> {
         let addr_key = axon_info.addr_key();
 
-        let connection = {
+        let (connection, bound) = {
             let state = self.state.read().await;
-            state.registry.get_connection(&addr_key)
+            (
+                state.registry.get_connection(&addr_key),
+                state
+                    .registry
+                    .is_authenticated_at(&axon_info.hotkey, &addr_key),
+            )
         };
 
         let max_fp = self.config.max_frame_payload_bytes;
         match connection {
             Some(conn) if conn.close_reason().is_none() => {
+                if !bound {
+                    return Err(LightningError::Handshake(format!(
+                        "no authenticated route for {} at {}",
+                        axon_info.hotkey, addr_key
+                    )));
+                }
                 debug!(
                     addr = %addr_key,
                     stable_id = conn.stable_id(),
@@ -604,15 +615,26 @@ impl LightningClient {
     ) -> Result<StreamingResponse> {
         let addr_key = axon_info.addr_key();
 
-        let connection = {
+        let (connection, bound) = {
             let state = self.state.read().await;
-            state.registry.get_connection(&addr_key)
+            (
+                state.registry.get_connection(&addr_key),
+                state
+                    .registry
+                    .is_authenticated_at(&axon_info.hotkey, &addr_key),
+            )
         };
 
         let max_fp = self.config.max_frame_payload_bytes;
         let max_sp = self.config.max_stream_payload_bytes;
         match connection {
             Some(conn) if conn.close_reason().is_none() => {
+                if !bound {
+                    return Err(LightningError::Handshake(format!(
+                        "no authenticated route for {} at {}",
+                        axon_info.hotkey, addr_key
+                    )));
+                }
                 open_streaming_synapse(
                     &conn,
                     request,
@@ -852,6 +874,14 @@ impl LightningClient {
             miners,
         )
         .await
+    }
+
+    /// Returns the set of miner hotkeys that currently hold an active,
+    /// authenticated connection binding. Callers can use this to route work
+    /// only to peers whose identity has been confirmed on their connection.
+    pub async fn authenticated_hotkeys(&self) -> std::collections::HashSet<String> {
+        let state = self.state.read().await;
+        state.registry.active_hotkeys().into_iter().collect()
     }
 
     /// Returns a map of connection statistics (total connections, active miners, per-address status).

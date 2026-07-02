@@ -96,6 +96,17 @@ impl MinerRegistry {
         self.active_miners.contains_key(hotkey)
     }
 
+    /// Whether `hotkey` holds an active registry entry bound to `addr`. A live
+    /// connection at an address may be shared by several hotkeys, so connection
+    /// reuse must be confirmed against the hotkey's own registered address
+    /// rather than the address alone.
+    pub fn is_authenticated_at(&self, hotkey: &str, addr: &PeerAddr) -> bool {
+        self.active_miners
+            .get(hotkey)
+            .map(|m| m.addr_key() == *addr)
+            .unwrap_or(false)
+    }
+
     pub fn active_hotkeys(&self) -> Vec<String> {
         self.active_miners.keys().cloned().collect()
     }
@@ -349,5 +360,20 @@ mod tests {
         assert_eq!(reg.active_miner_count(), 0);
         assert_eq!(reg.reconnect_state_count(), 0);
         reg.assert_invariants();
+    }
+
+    #[test]
+    fn is_authenticated_at_matches_hotkey_and_address() {
+        let mut reg = MinerRegistry::new();
+        reg.register(QuicAxonInfo::new("hk1".into(), "1.2.3.4".into(), 8080, 4));
+        let addr = PeerAddr::new("1.2.3.4", 8080);
+        let other_addr = PeerAddr::new("5.6.7.8", 9090);
+
+        assert!(reg.is_authenticated_at("hk1", &addr));
+        // A hotkey with no registry entry is not bound to any address, even one
+        // another hotkey happens to hold a live connection at.
+        assert!(!reg.is_authenticated_at("hk2", &addr));
+        // A registered hotkey is only bound to its own registered address.
+        assert!(!reg.is_authenticated_at("hk1", &other_addr));
     }
 }
