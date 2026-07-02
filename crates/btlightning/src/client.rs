@@ -876,9 +876,11 @@ impl LightningClient {
         .await
     }
 
-    /// Returns the set of miner hotkeys that currently hold an active,
-    /// authenticated connection binding. Callers can use this to route work
-    /// only to peers whose identity has been confirmed on their connection.
+    /// Returns the set of miner hotkeys that have completed the authentication
+    /// handshake and hold an active registry entry. A hotkey stays listed while
+    /// registered even if its connection is momentarily re-establishing, so
+    /// callers receive every peer whose identity has been confirmed, not only
+    /// those with a live connection at this instant.
     pub async fn authenticated_hotkeys(&self) -> std::collections::HashSet<String> {
         let state = self.state.read().await;
         state.registry.active_hotkeys().into_iter().collect()
