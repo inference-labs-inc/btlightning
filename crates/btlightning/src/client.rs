@@ -546,6 +546,15 @@ impl LightningClient {
         axon_info: QuicAxonInfo,
         request: QuicRequest,
     ) -> Result<QuicResponse> {
+        self.query_axon_inner(axon_info, request, None).await
+    }
+
+    async fn query_axon_inner(
+        &self,
+        axon_info: QuicAxonInfo,
+        request: QuicRequest,
+        response_timeout: Option<Duration>,
+    ) -> Result<QuicResponse> {
         let addr_key = axon_info.addr_key();
 
         let (connection, bound) = {
@@ -572,7 +581,7 @@ impl LightningClient {
                     stable_id = conn.stable_id(),
                     "query_axon: connection alive, sending synapse"
                 );
-                send_synapse_packet(&conn, request, max_fp).await
+                send_synapse_packet(&conn, request, max_fp, response_timeout).await
             }
             Some(conn) => {
                 let reason = conn.close_reason();
@@ -582,18 +591,25 @@ impl LightningClient {
                     close_reason = ?reason,
                     "QUIC connection closed, triggering reconnect"
                 );
-                self.try_reconnect_and_query(&addr_key, &axon_info, request)
+                self.try_reconnect_and_query(&addr_key, &axon_info, request, response_timeout)
                     .await
             }
             None => {
                 debug!(addr = %addr_key, "query_axon: no connection in registry");
-                self.try_reconnect_and_query(&addr_key, &axon_info, request)
+                self.try_reconnect_and_query(&addr_key, &axon_info, request, response_timeout)
                     .await
             }
         }
     }
 
-    /// Like [`query_axon`](Self::query_axon) but aborts after `timeout`.
+    /// Like [`query_axon`](Self::query_axon) but bounds how long the peer may
+    /// take to answer. The timeout budgets only the wait for the response
+    /// frame: the request transfer has its own size-proportional budget (see
+    /// [`write_budget_for`]) and the dial is bounded by `connect_timeout`, so
+    /// every phase is individually bounded. Wrapping the whole query instead
+    /// would drop the future mid-write for large payloads on slow paths,
+    /// resetting the stream so the peer reads a truncated request frame it
+    /// never had a chance to serve.
     #[instrument(skip(self, axon_info, request), fields(miner_ip = %axon_info.ip, miner_port = axon_info.port, timeout_ms = timeout.as_millis() as u64))]
     pub async fn query_axon_with_timeout(
         &self,
@@ -601,9 +617,8 @@ impl LightningClient {
         request: QuicRequest,
         timeout: Duration,
     ) -> Result<QuicResponse> {
-        tokio::time::timeout(timeout, self.query_axon(axon_info, request))
+        self.query_axon_inner(axon_info, request, Some(timeout))
             .await
-            .map_err(|_| LightningError::Transport("query timed out".into()))?
     }
 
     /// Sends a synapse request and returns a [`StreamingResponse`] for incremental chunk reading.
@@ -666,9 +681,16 @@ impl LightningClient {
         addr_key: &PeerAddr,
         axon_info: &QuicAxonInfo,
         request: QuicRequest,
+        response_timeout: Option<Duration>,
     ) -> Result<QuicResponse> {
         let connection = self.try_reconnect(addr_key, axon_info).await?;
-        send_synapse_packet(&connection, request, self.config.max_frame_payload_bytes).await
+        send_synapse_packet(
+            &connection,
+            request,
+            self.config.max_frame_payload_bytes,
+            response_timeout,
+        )
+        .await
     }
 
     async fn try_reconnect_and_stream(
@@ -1574,6 +1596,26 @@ async fn send_handshake(
     Ok(response)
 }
 
+/// Seconds granted to a request transfer regardless of size, covering stream
+/// scheduling and flow-control round trips on an otherwise healthy path.
+const WRITE_BUDGET_FLOOR_SECS: u64 = 5;
+/// Minimum sustained transfer rate a peer must accept before the transfer is
+/// abandoned. One MiB/s keeps multi-megabyte payloads deliverable over
+/// residential-grade paths while still bounding the write phase.
+const WRITE_BUDGET_MIN_BYTES_PER_SEC: u64 = 1024 * 1024;
+/// Hard ceiling on any single request transfer. A peer that reads slower than
+/// this bound cannot pin a dispatch slot indefinitely by dribbling acks.
+const WRITE_BUDGET_MAX_SECS: u64 = 60;
+
+/// Time budget for writing a request frame of `len` bytes: a fixed floor plus
+/// a size-proportional allowance, capped. Sized to the payload rather than to
+/// response latency so that a large request over a slow path is never reset
+/// mid-frame by a timeout calibrated on how fast peers *answer*.
+fn write_budget_for(len: usize) -> Duration {
+    let transfer_secs = (len as u64).div_ceil(WRITE_BUDGET_MIN_BYTES_PER_SEC);
+    Duration::from_secs((WRITE_BUDGET_FLOOR_SECS + transfer_secs).min(WRITE_BUDGET_MAX_SECS))
+}
+
 async fn send_synapse_frame(send: &mut quinn::SendStream, request: QuicRequest) -> Result<()> {
     let synapse_packet = SynapsePacket {
         synapse_type: request.synapse_type,
@@ -1585,13 +1627,26 @@ async fn send_synapse_frame(send: &mut quinn::SendStream, request: QuicRequest) 
         LightningError::Serialization(format!("Failed to serialize synapse packet: {}", e))
     })?;
 
-    write_frame_and_finish(send, MessageType::SynapsePacket, &packet_bytes).await
+    let budget = write_budget_for(packet_bytes.len());
+    tokio::time::timeout(
+        budget,
+        write_frame_and_finish(send, MessageType::SynapsePacket, &packet_bytes),
+    )
+    .await
+    .map_err(|_| {
+        LightningError::Transport(format!(
+            "request transfer timed out after {:?} ({} bytes unacknowledged by peer)",
+            budget,
+            packet_bytes.len()
+        ))
+    })?
 }
 
 async fn send_synapse_packet(
     connection: &Connection,
     request: QuicRequest,
     max_frame_payload: usize,
+    response_timeout: Option<Duration>,
 ) -> Result<QuicResponse> {
     let stable_id = connection.stable_id();
     debug!(stable_id, "send_synapse_packet: opening bi stream");
@@ -1609,7 +1664,13 @@ async fn send_synapse_packet(
         "send_synapse_packet: frame sent, awaiting response"
     );
 
-    let (msg_type, payload) = read_frame(&mut recv, max_frame_payload).await?;
+    let read = read_frame(&mut recv, max_frame_payload);
+    let (msg_type, payload) = match response_timeout {
+        Some(t) => tokio::time::timeout(t, read)
+            .await
+            .map_err(|_| LightningError::Transport("query timed out".into()))??,
+        None => read.await?,
+    };
     debug!(stable_id, msg_type = ?msg_type, elapsed_ms = start.elapsed().as_millis() as u64, "send_synapse_packet: response received");
 
     match msg_type {
@@ -1675,6 +1736,37 @@ mod tests {
 
     const MINER_SEED: [u8; 32] = [1u8; 32];
     const VALIDATOR_SEED: [u8; 32] = [2u8; 32];
+
+    #[test]
+    fn write_budget_scales_with_payload_size() {
+        let floor = write_budget_for(0);
+        assert_eq!(floor, Duration::from_secs(WRITE_BUDGET_FLOOR_SECS));
+
+        let one_mib = write_budget_for(1024 * 1024);
+        assert_eq!(one_mib, Duration::from_secs(WRITE_BUDGET_FLOOR_SECS + 1));
+
+        let ten_mib = write_budget_for(10 * 1024 * 1024);
+        assert_eq!(ten_mib, Duration::from_secs(WRITE_BUDGET_FLOOR_SECS + 10));
+    }
+
+    #[test]
+    fn write_budget_is_capped() {
+        let huge = write_budget_for(usize::MAX);
+        assert_eq!(huge, Duration::from_secs(WRITE_BUDGET_MAX_SECS));
+
+        let at_cap = write_budget_for((WRITE_BUDGET_MAX_SECS as usize) * 1024 * 1024 * 2);
+        assert_eq!(at_cap, Duration::from_secs(WRITE_BUDGET_MAX_SECS));
+    }
+
+    #[test]
+    fn write_budget_exceeds_typical_response_timeouts_for_large_payloads() {
+        // The regression this guards: a multi-megabyte request must get more
+        // transfer budget than the adaptive response timeout (single-digit
+        // seconds), so the response clock can never truncate a request frame
+        // mid-write again.
+        let five_mib = write_budget_for(5 * 1024 * 1024);
+        assert!(five_mib >= Duration::from_secs(10));
+    }
 
     fn make_signed_response(
         miner_seed: [u8; 32],
