@@ -16,7 +16,8 @@ pub use client::{
 pub use error::{LightningError, Result};
 #[cfg(feature = "subtensor")]
 pub use metagraph::{
-    is_valid_ip, Metagraph, MetagraphMonitorConfig, NeuronInfo, FINNEY_ENDPOINT, TESTNET_ENDPOINT,
+    connect_subtensor, is_valid_ip, Metagraph, MetagraphMonitorConfig, NeuronInfo, FINNEY_ENDPOINT,
+    TESTNET_ENDPOINT,
 };
 pub use server::{
     typed_async_handler, typed_handler, AsyncSynapseHandler, HandshakeObserver, LightningServer,

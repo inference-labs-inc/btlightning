@@ -63,13 +63,16 @@ async fn submit_extrinsic<Call: subxt::tx::Payload>(
     .unwrap_or_else(|_| panic!("{label} submission timed out after 30s"))
     .unwrap_or_else(|e| panic!("{label} submission failed: {e}"));
 
-    tokio::time::timeout(
+    match tokio::time::timeout(
         Duration::from_secs(60),
         progress.wait_for_finalized_success(),
     )
     .await
-    .unwrap_or_else(|_| panic!("{label} finalization timed out after 60s"))
-    .unwrap_or_else(|e| panic!("{label} finalization failed: {e}"));
+    {
+        Err(_) => panic!("{label} finalization timed out after 60s"),
+        Ok(Err(e)) => panic!("{label} finalization failed: {e}"),
+        Ok(Ok(_)) => {}
+    }
 }
 
 async fn query_total_networks(api: &OnlineClient<PolkadotConfig>) -> u16 {
@@ -91,7 +94,7 @@ async fn query_total_networks(api: &OnlineClient<PolkadotConfig>) -> u16 {
 #[tokio::test]
 #[ignore]
 async fn localnet_full_integration() {
-    let api = OnlineClient::<PolkadotConfig>::from_url(LOCALNET_ENDPOINT)
+    let api = btlightning::connect_subtensor::<PolkadotConfig>(LOCALNET_ENDPOINT)
         .await
         .expect("subtensor localnet must be reachable at ws://127.0.0.1:9944");
 
