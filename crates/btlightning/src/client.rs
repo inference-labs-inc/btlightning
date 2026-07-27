@@ -23,9 +23,9 @@ use tokio::time::Instant;
 use tracing::{debug, error, info, instrument, warn};
 
 #[cfg(feature = "subtensor")]
-use crate::metagraph::{Metagraph, MetagraphMonitorConfig};
+use crate::metagraph::{connect_subtensor, Metagraph, MetagraphMonitorConfig};
 #[cfg(feature = "subtensor")]
-use subxt::{OnlineClient, PolkadotConfig};
+use subxt::PolkadotConfig;
 
 /// Configuration for [`LightningClient`].
 ///
@@ -968,7 +968,7 @@ impl LightningClient {
 
         let subtensor = tokio::time::timeout(
             Duration::from_secs(30),
-            OnlineClient::<PolkadotConfig>::from_url(&monitor_config.subtensor_endpoint),
+            connect_subtensor::<PolkadotConfig>(&monitor_config.subtensor_endpoint),
         )
         .await
         .map_err(|_| LightningError::Handler("subtensor connection timed out after 30s".into()))?
@@ -1059,7 +1059,7 @@ impl LightningClient {
                 if needs_reconnect {
                     match tokio::time::timeout(
                         Duration::from_secs(30),
-                        OnlineClient::<PolkadotConfig>::from_url(&subtensor_url),
+                        connect_subtensor::<PolkadotConfig>(&subtensor_url),
                     )
                     .await
                     {

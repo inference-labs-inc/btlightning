@@ -5,10 +5,13 @@ use parity_scale_codec::{Compact, Decode, Encode};
 use sp_core::crypto::Ss58Codec;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
+use std::sync::Arc;
 use std::time::Duration;
+use subxt::backend::{ChainHeadBackend, CombinedBackend, LegacyBackend};
 use subxt::client::{OnlineClientAtBlock, OnlineClientAtBlockImpl};
 use subxt::dynamic::Value;
 use subxt::ext::scale_value::At;
+use subxt::rpcs::RpcClient;
 use subxt::storage::StorageClient;
 use subxt::{OnlineClient, PolkadotConfig};
 use tracing::{debug, info, warn};
@@ -37,6 +40,49 @@ fn format_ipv4(ip_raw: u128, ip_type: u8) -> String {
 pub const FINNEY_ENDPOINT: &str = "wss://entrypoint-finney.opentensor.ai:443";
 /// WebSocket endpoint for the Bittensor testnet subtensor node.
 pub const TESTNET_ENDPOINT: &str = "wss://test.finney.opentensor.ai:443";
+
+/// Open a subxt [`OnlineClient`] against `endpoint`. `wss://` URLs use the
+/// TLS-validating constructor; `ws://` URLs use the insecure one, which subxt
+/// requires for non-TLS sockets even when reaching localhost or a private
+/// substrate node.
+///
+/// The backend is assembled explicitly rather than via
+/// `OnlineClient::from_url`, which builds a `CombinedBackend` that enables the
+/// `archive_v1_*` backend whenever the node advertises those methods in
+/// `rpc_methods`. Pruned subtensor nodes advertise the archive namespace but
+/// answer every archive call with `Method not found (-32601)`, and the archive
+/// backend builds its storage streams lazily, so the failure surfaces on first
+/// poll rather than at construction and `CombinedBackend`'s per-call fallback
+/// chain never gets the chance to retry against `chainHead` or the legacy
+/// `state_*` methods. Omitting the archive backend keeps storage reads on the
+/// two backends every subtensor node actually serves.
+pub async fn connect_subtensor<T: subxt::Config + Default>(
+    endpoint: &str,
+) -> Result<OnlineClient<T>> {
+    let rpc_client = if endpoint.starts_with("ws://") {
+        RpcClient::from_insecure_url(endpoint).await
+    } else {
+        RpcClient::from_url(endpoint).await
+    }
+    .map_err(|e| LightningError::Connection(format!("connecting to subtensor {endpoint}: {e}")))?;
+
+    let chain_head = ChainHeadBackend::builder().build_with_background_driver(rpc_client.clone());
+    let legacy = LegacyBackend::builder().build(rpc_client.clone());
+
+    let backend = CombinedBackend::<T>::builder()
+        .no_default_backends()
+        .with_chainhead_backend(chain_head)
+        .with_legacy_backend(legacy)
+        .build_with_background_driver(rpc_client)
+        .await
+        .map_err(|e| {
+            LightningError::Connection(format!("building subtensor backend for {endpoint}: {e}"))
+        })?;
+
+    OnlineClient::<T>::from_backend(Arc::new(backend))
+        .await
+        .map_err(|e| LightningError::Connection(format!("connecting to subtensor {endpoint}: {e}")))
+}
 
 #[derive(Decode)]
 struct AxonInfoRaw {

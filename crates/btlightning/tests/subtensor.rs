@@ -6,7 +6,7 @@ use btlightning::{
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
-use subxt::{dynamic::Value, OnlineClient, SubstrateConfig};
+use subxt::{dynamic::Value, SubstrateConfig};
 
 const TESTNET_ENDPOINT: &str = "wss://test.finney.opentensor.ai:443";
 const PERMIT_POPULATION_TIMEOUT: Duration = Duration::from_secs(300);
@@ -22,7 +22,7 @@ impl SubtensorPermitResolver {
     }
 
     async fn resolve_async(&self) -> Result<HashSet<String>> {
-        let api = OnlineClient::<SubstrateConfig>::from_url(&self.rpc_url)
+        let api = btlightning::connect_subtensor::<SubstrateConfig>(&self.rpc_url)
             .await
             .map_err(|e| LightningError::Handler(format!("subtensor connection: {}", e)))?;
 
