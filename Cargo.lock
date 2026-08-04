@@ -702,9 +702,9 @@ dependencies = [
 
 [[package]]
 name = "btwallet"
-version = "4.0.1"
+version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfbd26f85078c02aa02c7913494602afb5b994580ab8581682c40a9c7361ffad"
+checksum = "8365dd736f1a158d7a84cf31c659f15c1060326e8a80364de9a0ed1439f5d357"
 dependencies = [
  "ansible-vault",
  "base64 0.22.1",
