@@ -188,7 +188,10 @@ mod tests {
             signer.keypair.ss58_address().unwrap(),
             "5DfhGyQdFobKM8NsWvEeAKk5EQQgYe9AydgJ7rMB6E1EqRzV"
         );
-        assert_eq!(signer.sign(b"regression check").unwrap().len(), 64);
+        let message = b"regression check".to_vec();
+        let signature = signer.sign(&message).unwrap();
+        assert_eq!(signature.len(), 64);
+        assert!(signer.keypair.verify(message, signature).unwrap());
     }
 
     #[test]
