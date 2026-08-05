@@ -109,11 +109,9 @@ impl BtWalletSigner {
             Some(path.to_string()),
             None,
         );
-        let keypair = wallet
-            .get_hotkey(Some(hotkey_name.to_string()))
-            .map_err(|e| {
-                LightningError::Config(format!("failed to load hotkey from wallet: {}", e))
-            })?;
+        let keypair = wallet.get_hotkey(None).map_err(|e| {
+            LightningError::Config(format!("failed to load hotkey from wallet: {}", e))
+        })?;
         Ok(Self { keypair })
     }
 }
@@ -132,6 +130,9 @@ mod tests {
     use super::*;
 
     #[cfg(feature = "btwallet")]
+    const CRYPTO_SR25519: u8 = 1;
+
+    #[cfg(feature = "btwallet")]
     #[test]
     fn from_wallet_resolves_hotkey_with_custom_path() {
         let dir = tempfile::tempdir().unwrap();
@@ -145,7 +146,7 @@ mod tests {
             None,
         );
         wallet
-            .new_hotkey(12, false, true, true, false, None)
+            .new_hotkey(12, false, true, true, false, None, CRYPTO_SR25519)
             .unwrap();
 
         let expected_ss58 = wallet.get_hotkey(None).unwrap().ss58_address().unwrap();
@@ -163,6 +164,34 @@ mod tests {
             loaded_ss58, expected_ss58,
             "from_wallet loaded a different keypair than the one written to disk"
         );
+    }
+
+    #[cfg(feature = "btwallet")]
+    #[test]
+    fn from_wallet_loads_hotkey_carrying_integer_crypto_type() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let hotkeys = dir.path().join("testwallet").join("hotkeys");
+        std::fs::create_dir_all(&hotkeys).unwrap();
+        let mut f = std::fs::File::create(hotkeys.join("testhk")).unwrap();
+        f.write_all(
+            br#"{"secretPhrase":"bottom drive obey lake curtain smoke basket hold race lonely fit walk","cryptoType":1}"#,
+        )
+        .unwrap();
+
+        let signer =
+            BtWalletSigner::from_wallet("testwallet", &dir.path().to_string_lossy(), "testhk")
+                .expect("hotkey carrying an integer cryptoType should load");
+
+        assert_eq!(
+            signer.keypair.ss58_address().unwrap(),
+            "5DfhGyQdFobKM8NsWvEeAKk5EQQgYe9AydgJ7rMB6E1EqRzV"
+        );
+        let message = b"regression check".to_vec();
+        let signature = signer.sign(&message).unwrap();
+        assert_eq!(signature.len(), 64);
+        assert!(signer.keypair.verify(message, signature).unwrap());
     }
 
     #[test]
