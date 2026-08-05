@@ -28,7 +28,7 @@ base64 = "0.22"
 indexmap = "2"
 rand = "0.8"
 sp-core = "34.0"
-bittensor_wallet = { version = "4.0.1", package = "btwallet", default-features = false, optional = true }
+bittensor_wallet = { version = "4.1.0", package = "btwallet", default-features = false, optional = true }
 parity-scale-codec = { version = "3", optional = true, features = ["derive"] }
 futures-util = { version = "0.3", optional = true }
 
